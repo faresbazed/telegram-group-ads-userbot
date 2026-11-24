@@ -6,6 +6,7 @@ from tempfile import NamedTemporaryFile
 
 
 INTERVAL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+MAX_MESSAGE_LENGTH = 4096
 GROUP_LINK = re.compile(r"(?:https?://)?t\.me/(.+)", re.IGNORECASE)
 USERNAME = re.compile(r"[a-zA-Z0-9_]+")
 INVITE = re.compile(r"(?:\+|joinchat/)([a-zA-Z0-9_-]+)")
@@ -55,6 +56,8 @@ class Campaign:
             raise ValueError("campaign name must have 1–64 letters, digits, underscores or hyphens")
         if not isinstance(self.message, str) or not self.message.strip():
             raise ValueError("campaign message must not be blank")
+        if len(self.message) > MAX_MESSAGE_LENGTH:
+            raise ValueError(f"campaign message exceeds Telegram's {MAX_MESSAGE_LENGTH}-character limit")
         if not isinstance(self.groups, list) or not self.groups:
             raise ValueError("campaign must have at least one group")
         for group in self.groups:

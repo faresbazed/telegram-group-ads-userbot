@@ -23,6 +23,17 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             group_ref("https://example.org/Example_Group")
 
+    def test_campaign_message_limit_is_enforced_on_creation_and_load(self):
+        valid = Campaign("sale", "x" * 4096, ["@group"], "2h")
+        too_long = {**vars(valid), "message": valid.message + "y"}
+        with self.assertRaisesRegex(ValueError, "4096-character limit"):
+            Campaign(**too_long)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaigns.json"
+            write_json(path, [too_long])
+            with self.assertRaisesRegex(ValueError, "4096-character limit"):
+                load_campaigns(path)
+
     def test_config_round_trip_and_validation(self):
         campaign = Campaign("weekend", "Sale 🎉", ["@group", "-123"], "2h", False)
         with tempfile.TemporaryDirectory() as directory:
