@@ -88,12 +88,13 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("4096-character limit", (await self.text("x" * 4097)).args[0])
         await self.text("Sale today")
         self.assertIn("interval must", (await self.text("bad interval")).args[0])
-        await self.text("2h")
+        prompt = await self.text("2h")
         await self.text("/cancel", sender=200)
-        picker = await self.click("groups:0")
-        self.assertEqual(button_data(picker.kwargs["buttons"][0][0]), b"pick:-20")
-        await self.click("pick:-20")
-        await self.click("save_groups")
+        picker = await self.click(button_data(prompt.kwargs["buttons"][0][0]).decode())
+        pick = button_data(picker.kwargs["buttons"][0][0])
+        self.assertRegex(pick, rb"^pick:[a-f0-9]{16}:-20$")
+        selected = await self.click(pick.decode())
+        await self.click(button_data(selected.kwargs["buttons"][0][0]).decode())
         campaign = load_campaigns(self.path)["weekend"]
         self.assertEqual((campaign.message, campaign.interval, campaign.groups, campaign.enabled),
                          ("Sale today", "2h", ["-20"], False))
@@ -114,8 +115,8 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         await self.text("/removegroup weekend")
         await self.text("-20")
         self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["https://t.me/another"])
-        await self.text("/removegroup weekend")
-        picker = await self.click("remove_list:0")
+        prompt = await self.text("/removegroup weekend")
+        picker = await self.click(button_data(prompt.kwargs["buttons"][0][0]).decode())
         self.assertIn("at least one group", (
             await self.click(button_data(picker.kwargs["buttons"][0][0]).decode())
         ).args[0])
@@ -156,6 +157,30 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         await self.text("/removegroup weekend")
         await self.text("@ads_group")
         self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["-21"])
+
+    async def test_group_picker_callbacks_cannot_edit_a_new_flow(self):
+        first = await self.create()
+        with edit_campaigns(self.path) as campaigns:
+            campaigns["weekday"] = replace(first, name="weekday")
+        prompt = await self.text("/addgroup weekend")
+        picker = await self.click(button_data(prompt.kwargs["buttons"][0][0]).decode())
+        previous_pick = button_data(picker.kwargs["buttons"][1][0]).decode()
+        current = await self.text("/addgroup weekday")
+        self.assertIn("This menu is outdated", (await self.click(previous_pick)).args[0])
+        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["@ads_group"])
+        picker = await self.click(button_data(current.kwargs["buttons"][0][0]).decode())
+        await self.click(button_data(picker.kwargs["buttons"][1][0]).decode())
+        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["@ads_group", "-21"])
+
+        prompt = await self.text("/removegroup weekend")
+        picker = await self.click(button_data(prompt.kwargs["buttons"][0][0]).decode())
+        previous_remove = button_data(picker.kwargs["buttons"][0][0]).decode()
+        current = await self.text("/removegroup weekday")
+        self.assertIn("This menu is outdated", (await self.click(previous_remove)).args[0])
+        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["@ads_group", "-21"])
+        picker = await self.click(button_data(current.kwargs["buttons"][0][0]).decode())
+        await self.click(button_data(picker.kwargs["buttons"][0][0]).decode())
+        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["-21"])
 
     async def test_runner_registers_and_disconnects_optional_control_client(self):
         client = SimpleNamespace(

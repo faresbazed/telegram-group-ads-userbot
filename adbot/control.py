@@ -3,6 +3,7 @@ import hashlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from secrets import token_hex
 
 from filelock import Timeout
 from telethon import Button, errors, events
@@ -75,6 +76,7 @@ class Flow:
     interval: str = ""
     groups: list[str] = field(default_factory=list)
     confirmation: Campaign | None = None
+    nonce: str = field(default_factory=lambda: token_hex(8))
 
 
 class ControlBot:
@@ -254,7 +256,7 @@ class ControlBot:
             return self.confirm(owner)
         if action == "list":
             return self.listing(int(key))
-        if action in {"groups", "pick", "save_groups", "remove_pick", "remove_list"}:
+        if action in {"groups", "pick", "save_groups", "remove_pick", "remove_list", "cancel_groups"}:
             return await self.group_callback(owner, action, key)
         for campaign in load_campaigns(self.path).values():
             if record_key(campaign.name) == key:
@@ -323,13 +325,14 @@ class ControlBot:
         return self.listing()
 
     def group_prompt(self, flow: Flow) -> View:
+        cancel = button("Cancel", f"cancel_groups:{flow.nonce}")
         if flow.step == "remove_group":
             return View("Enter groups to remove, or select a configured group.", [
-                [button("Configured groups", "remove_list:0"), button("Cancel", "menu")],
+                [button("Configured groups", f"remove_list:{flow.nonce}:0"), cancel],
             ])
-        rows = [[button("Joined groups", "groups:0"), button("Cancel", "menu")]]
+        rows = [[button("Joined groups", f"groups:{flow.nonce}:0"), cancel]]
         if flow.step == "new_groups" and flow.groups:
-            rows.insert(0, [button(f"Save {len(flow.groups)} selected group(s)", "save_groups")])
+            rows.insert(0, [button(f"Save {len(flow.groups)} selected group(s)", f"save_groups:{flow.nonce}")])
         return View("Enter group IDs, @usernames, or Telegram links (separate multiple groups with spaces).", rows)
 
     async def account_lookup(self, operation, *args):
@@ -361,20 +364,28 @@ class ControlBot:
             result.setdefault(key, target)
         return list(result.values())
 
-    async def group_callback(self, owner: int, action: str, key: str) -> View:
+    async def group_callback(self, owner: int, action: str, payload: str) -> View:
+        nonce, _, key = payload.partition(":")
         flow = self.flows.get(owner)
-        if flow is not None and flow.step == "remove_group":
+        if flow is None or flow.nonce != nonce or flow.step not in {"new_groups", "add_group", "remove_group"}:
+            raise ValueError("This menu is outdated. Open the current group picker again.")
+        cancel = button("Cancel", f"cancel_groups:{nonce}")
+        if action == "cancel_groups":
+            self.flows.pop(owner)
+            return self.menu()
+        if flow.step == "remove_group":
             campaign = find_campaign(load_campaigns(self.path), flow.name)
             if action == "remove_list":
-                entries = [button(target[:60], f"remove_pick:{record_key(target)}") for target in campaign.groups]
-                return self.page("Choose a group to remove.", entries, int(key), "remove_list", [button("Cancel", "menu")])
+                entries = [
+                    button(target[:60], f"remove_pick:{nonce}:{record_key(target)}") for target in campaign.groups
+                ]
+                return self.page("Choose a group to remove.", entries, int(key), f"remove_list:{nonce}", [cancel])
             if action == "remove_pick":
                 selected = [target for target in campaign.groups if record_key(target) == key]
                 if selected:
                     return await self.update_groups(owner, flow, selected)
                 raise ValueError("That group is no longer configured for the campaign.")
-        if flow is None or flow.step not in {"new_groups", "add_group"}:
-            raise ValueError("Start a group selection from a campaign first.")
+            raise ValueError("This menu is outdated. Open the current group picker again.")
         if action == "save_groups" and flow.step == "new_groups":
             return await self.create(owner, flow, flow.groups)
         if action not in {"groups", "pick"}:
@@ -382,11 +393,11 @@ class ControlBot:
         async with self.dispatch_lock:
             groups = await self.account_lookup(self.scheduler.directory.joined)
         if action == "groups":
-            entries = [button(f"{group.title[:40]} ({group.id})", f"pick:{group.id}") for group in groups.values()]
-            back = [button("Cancel", "menu")]
+            entries = [button(f"{group.title[:40]} ({group.id})", f"pick:{nonce}:{group.id}") for group in groups.values()]
+            back = [cancel]
             if flow.groups:
-                back.insert(0, button(f"Save {len(flow.groups)} selected", "save_groups"))
-            return self.page("Joined groups" if entries else "No joined groups found.", entries, int(key), "groups", back)
+                back.insert(0, button(f"Save {len(flow.groups)} selected", f"save_groups:{nonce}"))
+            return self.page("Joined groups" if entries else "No joined groups found.", entries, int(key), f"groups:{nonce}", back)
         group_id = int(key)
         if group_id not in groups:
             raise ValueError("That group is no longer in your joined list.")
