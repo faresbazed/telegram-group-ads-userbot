@@ -157,12 +157,18 @@ fi
 as_root=()
 if (( EUID != 0 )) && { (( needs_deps )) || [[ $service == yes ]]; }; then
     command -v sudo >/dev/null || die "sudo is required to install packages or the system service"
-    if (( non_interactive )); then sudo -n -v; else sudo -v; fi
-    as_root=(sudo -n)
+    as_root=(sudo)
+    if (( non_interactive )); then as_root+=(-n); fi
 fi
+
+privileged() {
+    "${as_root[@]}" "$@" ||
+        die "privileged command failed: $*. Review the error above and check sudo access for this command."
+}
+
 if (( needs_deps )); then
-    "${as_root[@]}" apt-get update
-    "${as_root[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv
+    privileged apt-get update
+    DEBIAN_FRONTEND=noninteractive privileged apt-get install -y python3 python3-venv
     python_ready || die "this distribution did not provide Python 3.10+ with venv support"
 fi
 
@@ -219,14 +225,15 @@ unit_arg() {
 }
 
 if [[ $service == yes ]]; then
+    as_root=(sudo -n)
     temporary=$(mktemp "$data_dir/adbot.service.XXXXXX.tmp")
     printf '%s\n' '[Unit]' 'Description=Telegram group ads scheduler' 'Wants=network-online.target' 'After=network-online.target' \
         '' '[Service]' "User=$(id -un)" "WorkingDirectory=${repo//%/%%}" \
         "ExecStart=$(unit_arg ":$repo/.venv/bin/python") -m adbot --data-dir $(unit_arg "$data_dir") run" \
         'Restart=on-failure' 'RestartSec=10' 'UMask=0077' '' '[Install]' 'WantedBy=multi-user.target' > "$temporary"
-    "${as_root[@]}" install -m 0644 -- "$temporary" /etc/systemd/system/adbot.service
-    "${as_root[@]}" systemctl daemon-reload
-    "${as_root[@]}" systemctl enable --now adbot.service
+    privileged install -m 0644 -- "$temporary" /etc/systemd/system/adbot.service
+    privileged systemctl daemon-reload
+    privileged systemctl enable --now adbot.service
     printf '%s\n' 'Installed and started adbot.service. Check: systemctl status adbot'
 else
     if (( skip_login )); then

@@ -21,6 +21,8 @@ The installer asks for everything up front: your API ID and hash ([my.telegram.o
 
 Answer **yes** to install `adbot.service` and start it at boot. The installer installs missing Python and venv packages, creates `.venv`, and then asks for the Telegram login code and your 2FA password if required. It saves the new settings to a private `~/.config/adbot/.env` only after login and any initial campaign setup succeed. The phone number, login code, and 2FA password are not saved in `.env`. If you configured a bot token, open your bot in Telegram and send `/start` in a private chat. Only reasonably trusted people should be listed as owners.
 
+Service installation does not prompt for a sudo password after Telegram login. If your sudo policy requires one, authorize sudo just before running the installer (for example, `sudo -v`).
+
 **Check status and logs** (when the system service was installed):
 
 ```sh
@@ -56,7 +58,7 @@ Inject `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from your deployment environmen
 ./install.sh --non-interactive --systemd
 ```
 
-Any required privileged commands in this mode need passwordless or already-authorized `sudo`. First-time Telegram sign-in still requires the interactive code and, if enabled, a 2FA password. To only prepare the installation, run `./install.sh --non-interactive --skip-login --no-systemd`; provide `OWNER_ID` yourself if setting a bot token in this mode. Use `--data-dir DIR` to choose another data directory. The installer will not replace an existing `.env` without confirmation or `--replace-env`; use the update commands above for routine updates. To supply an optional first campaign non-interactively, set `ADBOT_CAMPAIGN_NAME`, `ADBOT_CAMPAIGN_MESSAGE`, `ADBOT_CAMPAIGN_INTERVAL`, and space-separated `ADBOT_CAMPAIGN_GROUPS`.
+Only the privileged commands actually used need passwordless or already-authorized `sudo`; command-specific sudo rules are supported. First-time Telegram sign-in still requires the interactive code and, if enabled, a 2FA password. To only prepare the installation, run `./install.sh --non-interactive --skip-login --no-systemd`; provide `OWNER_ID` yourself if setting a bot token in this mode. Use `--data-dir DIR` to choose another data directory. The installer will not replace an existing `.env` without confirmation or `--replace-env`; use the update commands above for routine updates. To supply an optional first campaign non-interactively, set `ADBOT_CAMPAIGN_NAME`, `ADBOT_CAMPAIGN_MESSAGE`, `ADBOT_CAMPAIGN_INTERVAL`, and space-separated `ADBOT_CAMPAIGN_GROUPS`.
 
 ## Manual setup
 

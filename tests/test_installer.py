@@ -65,8 +65,8 @@ if [[ $1 = whoami ]]; then echo 100; fi
 set -eu
 [[ $1 = -n ]]
 shift
+if [[ "$*" = "${FAIL_PRIVILEGED:-}" ]]; then exit 1; fi
 case "$1" in
-    -v) echo sudo-validate >> "$TRACE" ;;
     install) [[ $6 = /etc/systemd/system/adbot.service ]]; cp -- "$5" "$UNIT" ;;
     systemctl) echo "$*" >> "$TRACE" ;;
     *) exit 1 ;;
@@ -170,6 +170,15 @@ esac
         self.assertIn("Restart=on-failure\n", unit)
         self.assertIn("UMask=0077\n", unit)
         self.assertEqual(self.trace.read_text().splitlines(), [
-            "sudo-validate", "venv", "pip", "whoami", "systemctl daemon-reload",
+            "venv", "pip", "whoami", "systemctl daemon-reload",
             "systemctl enable --now adbot.service",
         ])
+
+    @unittest.skipIf(getattr(os, "geteuid", lambda: 0)() == 0 or Path("/etc/systemd/system/adbot.service").exists(),
+                     "requires a non-root test user without an installed adbot service")
+    def test_privileged_failure_identifies_the_command(self):
+        self.env["FAIL_PRIVILEGED"] = "systemctl daemon-reload"
+        result = self.install("--systemd")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("privileged command failed: systemctl daemon-reload", result.stderr)
+        self.assertNotIn("systemctl enable", self.trace.read_text())
