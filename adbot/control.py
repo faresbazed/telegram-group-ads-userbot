@@ -23,7 +23,6 @@ from .telegram import FLOOD_WAITS
 
 
 PAGE_SIZE = 8
-TARGET_STABILITY = {"invite": 0, "username": 1, "channel_id": 2, "id": 3}
 ACTIONS = {
     "campaign": "view", "edit": "text", "interval": "interval",
     "addgroup": "add_group", "removegroup": "remove_group",
@@ -362,19 +361,15 @@ class ControlBot:
         targets = existing + additions
         keys = await self.target_keys(targets)
         touched = set(keys[len(existing):])
-        preferred: dict[tuple[str, str], tuple[int, str]] = {}
-        for target, key in zip(targets, keys):
-            if key in touched:
-                rank = TARGET_STABILITY[group_ref(target)[0]]
-                if key not in preferred or rank > preferred[key][0]:
-                    preferred[key] = rank, target
-
         result = []
+        seen = set()
         for target, key in zip(targets, keys):
             if key not in touched:
                 result.append(target)
-            elif key in preferred:
-                result.append(preferred.pop(key)[1])
+            elif key not in seen:
+                kind, value = key
+                result.append(value if kind == "chat" else target)
+                seen.add(key)
         return result
 
     async def group_callback(self, owner: int, action: str, payload: str) -> View:

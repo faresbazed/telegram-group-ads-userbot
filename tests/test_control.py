@@ -6,11 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from telethon import types, utils
+
 from adbot.__main__ import run_scheduler
 from adbot.config import edit_campaigns, load_campaigns
 from adbot.control import ControlBot, record_key
 from adbot.scheduler import Schedule, Scheduler
-from adbot.telegram import Group, control_settings
+from adbot.telegram import Group, GroupDirectory, control_settings
 
 
 def message(text, *, sender=100, private=True):
@@ -112,10 +114,10 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         await self.text("https://t.me/another")
         campaign = load_campaigns(self.path)["weekend"]
         self.assertEqual((campaign.message, campaign.interval, campaign.groups),
-                         ("Replacement", "30m", ["@ads_group", "https://t.me/another"]))
+                         ("Replacement", "30m", ["-20", "-21"]))
         await self.text("/removegroup weekend")
-        await self.text("-20")
-        self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["https://t.me/another"])
+        await self.text("@ads_group")
+        self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["-21"])
         prompt = await self.text("/removegroup weekend")
         picker = await self.click(button_data(prompt.kwargs["buttons"][0][0]).decode())
         self.assertIn("at least one group", (
@@ -159,22 +161,46 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         await self.text("@ads_group")
         self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["-21"])
 
-    async def test_add_group_prefers_stable_refs_without_touching_other_chats(self):
+    async def test_add_group_stores_marked_ids_without_touching_other_chats(self):
         await self.create()
         invite = "https://t.me/+AdsInvite"
         untouched = ["https://t.me/another", "-21"]
-        for saved, addition, chosen in (
-            (invite, "-20", "-20"),
-            (invite, "@ads_group", "@ads_group"),
-            ("@ads_group", "-20", "-20"),
-            ("-20", invite, "-20"),
+        for saved, addition in (
+            (invite, "-20"),
+            (invite, "@ads_group"),
+            ("@ads_group", "-20"),
+            ("-20", invite),
         ):
             with self.subTest(saved=saved, addition=addition):
                 with edit_campaigns(self.path) as campaigns:
                     campaigns["weekend"] = replace(campaigns["weekend"], groups=[saved, *untouched])
                 await self.text("/addgroup weekend")
                 await self.text(addition)
-                self.assertEqual(load_campaigns(self.path)["weekend"].groups, [chosen, *untouched])
+                self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["-20", *untouched])
+
+    async def test_bare_group_id_cannot_replace_a_resolved_peer_when_it_becomes_ambiguous(self):
+        await self.create()
+        directory = GroupDirectory(Mock())
+        directory.expires = float("inf")
+        self.scheduler.directory = directory
+        bare = 12345
+        marked = utils.get_peer_id(types.PeerChannel(bare))
+        channel = Group(marked, "Supergroup", (), types.InputPeerChannel(bare, 1))
+        directory.groups[marked] = channel
+        with edit_campaigns(self.path) as campaigns:
+            campaigns["weekend"] = replace(campaigns["weekend"], groups=[f"https://t.me/c/{bare}/1"])
+
+        await self.text("/addgroup weekend")
+        await self.text(str(bare))
+        self.assertEqual(load_campaigns(self.path)["weekend"].groups, [str(marked)])
+
+        directory.groups[-bare] = Group(-bare, "Basic group", (), types.InputPeerChat(bare))
+        directory.lookups.clear()
+        self.assertIsNone(await directory.resolve(str(bare)))
+        await self.text("/addgroup weekend")
+        await self.text(str(bare))
+        self.assertEqual(load_campaigns(self.path)["weekend"].groups, [str(marked), str(bare)])
+        self.assertEqual(await directory.resolve(str(marked)), channel)
 
     async def test_group_picker_callbacks_cannot_edit_a_new_flow(self):
         first = await self.create()
@@ -185,17 +211,17 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         previous_pick = button_data(picker.kwargs["buttons"][1][0]).decode()
         current = await self.text("/addgroup weekday")
         self.assertIn("This menu is outdated", (await self.click(previous_pick)).args[0])
-        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["@ads_group"])
+        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["-20"])
         picker = await self.click(button_data(current.kwargs["buttons"][0][0]).decode())
         await self.click(button_data(picker.kwargs["buttons"][1][0]).decode())
-        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["@ads_group", "-21"])
+        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["-20", "-21"])
 
         prompt = await self.text("/removegroup weekend")
         picker = await self.click(button_data(prompt.kwargs["buttons"][0][0]).decode())
         previous_remove = button_data(picker.kwargs["buttons"][0][0]).decode()
         current = await self.text("/removegroup weekday")
         self.assertIn("This menu is outdated", (await self.click(previous_remove)).args[0])
-        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["@ads_group", "-21"])
+        self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["-20", "-21"])
         picker = await self.click(button_data(current.kwargs["buttons"][0][0]).decode())
         await self.click(button_data(picker.kwargs["buttons"][0][0]).decode())
         self.assertEqual(load_campaigns(self.path)["weekday"].groups, ["-21"])
