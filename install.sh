@@ -172,24 +172,25 @@ if [[ ! -x .venv/bin/python ]]; then python3 -m venv .venv; fi
 .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
 run=("$repo/.venv/bin/python" -m adbot --data-dir "$data_dir")
 
-temporary=
+temporary=$(mktemp "$data_dir/.env.XXXXXX.tmp")
 trap 'if [[ -n $temporary ]]; then rm -f -- "$temporary"; fi' EXIT
 write_settings() {
-    temporary=$(mktemp "$data_dir/.env.XXXXXX.tmp")
     printf 'TELEGRAM_API_ID=%s\nTELEGRAM_API_HASH=%s\nBOT_TOKEN=%s\nOWNER_ID=%s\n' \
         "$api_id" "$api_hash" "$bot_token" "$owner_id" > "$temporary"
-    mv -fT -- "$temporary" "$data_dir/.env"
-    temporary=
+}
+
+run_setup() {
+    TELEGRAM_API_ID="$api_id" TELEGRAM_API_HASH="$api_hash" BOT_TOKEN="$bot_token" OWNER_ID="$owner_id" "${run[@]}" "$@"
 }
 
 write_settings
 if (( ! skip_login )); then
     if (( ! non_interactive )); then
         printf '%s\n' 'Sign in now using the Telegram code and, if enabled, your 2FA password.'
-        TELEGRAM_PHONE="$phone" "${run[@]}" login
+        TELEGRAM_PHONE="$phone" run_setup login
     fi
     if (( non_interactive )) || [[ -n $bot_token && -z $owner_id ]]; then
-        account_id=$("${run[@]}" whoami) || die "Telegram login is required; run the installer interactively or use --skip-login without --systemd"
+        account_id=$(run_setup whoami) || die "Telegram login is required; run the installer interactively or use --skip-login without --systemd"
         if [[ -n $bot_token && -z $owner_id ]]; then
             owner_ids_valid "$account_id" || die "could not determine your Telegram user ID"
             owner_id=$account_id
@@ -201,8 +202,10 @@ fi
 if (( campaign )); then
     group_flags=()
     for group in "${groups[@]}"; do group_flags+=("--group=$group"); done
-    "${run[@]}" add "$ADBOT_CAMPAIGN_NAME" --message="$message" --interval="$ADBOT_CAMPAIGN_INTERVAL" "${group_flags[@]}" --disabled
+    run_setup add "$ADBOT_CAMPAIGN_NAME" --message="$message" --interval="$ADBOT_CAMPAIGN_INTERVAL" "${group_flags[@]}" --disabled
 fi
+mv -fT -- "$temporary" "$data_dir/.env"
+temporary=
 
 unit_arg() {
     local path=${1//\\/\\\\}

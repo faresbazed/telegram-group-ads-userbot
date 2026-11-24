@@ -19,7 +19,7 @@ cd telegram-group-ads-userbot
 
 The installer asks for everything up front: your API ID and hash ([my.telegram.org](https://my.telegram.org) → **API development tools**), your phone number with country code, and optionally a token from [@BotFather](https://t.me/BotFather) (`/newbot`). If you supply a token, leave the owner ID blank to use the Telegram account you sign in with, or enter a comma-separated list of numeric Telegram user IDs to explicitly grant others full campaign control. You can also enter a first campaign; it starts disabled.
 
-Answer **yes** to install `adbot.service` and start it at boot. The installer installs missing Python and venv packages, creates `.venv`, and writes a private `~/.config/adbot/.env`. Then it asks for the Telegram login code and your 2FA password if required. The phone number, login code, and 2FA password are not saved in `.env`. If you configured a bot token, open your bot in Telegram and send `/start` in a private chat. Only reasonably trusted people should be listed as owners.
+Answer **yes** to install `adbot.service` and start it at boot. The installer installs missing Python and venv packages, creates `.venv`, and then asks for the Telegram login code and your 2FA password if required. It saves the new settings to a private `~/.config/adbot/.env` only after login and any initial campaign setup succeed. The phone number, login code, and 2FA password are not saved in `.env`. If you configured a bot token, open your bot in Telegram and send `/start` in a private chat. Only reasonably trusted people should be listed as owners.
 
 **Check status and logs** (when the system service was installed):
 

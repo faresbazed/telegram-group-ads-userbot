@@ -46,9 +46,11 @@ if [[ $2 = pip ]]; then
     echo pip >> "$TRACE"
     exit 0
 fi
-[[ $1 = -m && $2 = adbot && $3 = --data-dir && -f $4/.env ]]
+[[ $1 = -m && $2 = adbot && $3 = --data-dir && -n $TELEGRAM_API_ID && -n $TELEGRAM_API_HASH ]]
+if [[ -n ${EXPECT_OLD_ENV:-} ]]; then [[ $(< "$4/.env") = "$EXPECT_OLD_ENV" ]]; fi
 shift 4
 printf '%s\n' "$@" >> "$TRACE"
+if [[ $1 = "${FAIL_COMMAND:-}" ]]; then exit 1; fi
 if [[ $1 = whoami ]]; then echo 100; fi
 """)
         self.executable(bin_dir / "systemctl", "#!/bin/bash\nexit 1\n")
@@ -110,6 +112,30 @@ esac
         self.assertIn("TELEGRAM_API_HASH must be", result.stderr)
         self.assertFalse(self.data.exists())
         self.assertFalse(self.trace.exists())
+
+    def test_replacement_settings_commit_only_after_login_and_campaign_succeed(self):
+        self.data.mkdir()
+        settings = self.data / ".env"
+        old_settings = "TELEGRAM_API_ID=999"
+        settings.write_text(old_settings + "\n", encoding="utf-8")
+        self.env.update({
+            "EXPECT_OLD_ENV": old_settings,
+            "ADBOT_CAMPAIGN_NAME": "weekend",
+            "ADBOT_CAMPAIGN_MESSAGE": "Weekend sale",
+            "ADBOT_CAMPAIGN_INTERVAL": "2h",
+            "ADBOT_CAMPAIGN_GROUPS": "@test_group",
+        })
+        for command in ("whoami", "add"):
+            with self.subTest(command=command):
+                self.env["FAIL_COMMAND"] = command
+                result = self.install("--no-systemd", "--replace-env")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(settings.read_text(), old_settings + "\n")
+                self.assertEqual(list(self.data.glob(".env.*.tmp")), [])
+        del self.env["FAIL_COMMAND"]
+        result = self.install("--no-systemd", "--replace-env")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("TELEGRAM_API_ID=12345\n", settings.read_text())
 
     def test_existing_session_sets_owner_without_prompting(self):
         self.env["BOT_TOKEN"] = "123:offline-test-token"
