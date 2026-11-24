@@ -8,9 +8,10 @@ from pathlib import Path
 from filelock import FileLock, Timeout
 from telethon import errors, utils
 
-from .config import Campaign, load_campaigns, save_campaigns
+from .config import Campaign, edit_campaigns, find_campaign, load_campaigns
+from .control import ControlBot
 from .scheduler import ACCOUNT_RESTRICTIONS, POLL_INTERVAL, Schedule, Scheduler
-from .telegram import FLOOD_WAITS, GroupDirectory, make_client
+from .telegram import FLOOD_WAITS, GroupDirectory, control_settings, make_client
 
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ def parser() -> argparse.ArgumentParser:
     commands = cli.add_subparsers(dest="command", required=True)
     commands.add_parser("login", help="sign in to your Telegram account interactively")
     commands.add_parser("list-groups", help="show joined Telegram groups and their IDs")
+    commands.add_parser("whoami", help="show the logged-in Telegram user ID")
     add = commands.add_parser("add", help="add a campaign")
     add.add_argument("name")
     add.add_argument("--message", required=True)
@@ -41,24 +43,17 @@ def parser() -> argparse.ArgumentParser:
     return cli
 
 
-def find_campaign(campaigns: dict[str, Campaign], name: str) -> Campaign:
-    try:
-        return campaigns[name]
-    except KeyError:
-        raise ValueError(f"unknown campaign: {name}") from None
-
-
 def manage(args: argparse.Namespace) -> None:
     path = args.data_dir / "campaigns.json"
-    with FileLock(args.data_dir / "campaigns.lock", timeout=5, mode=0o600):
+    if args.command == "list":
         campaigns = load_campaigns(path)
-        if args.command == "list":
-            if not campaigns:
-                print("No campaigns configured.")
-            for campaign in campaigns.values():
-                status = "enabled" if campaign.enabled else "disabled"
-                print(f"{campaign.name}: {status}, every {campaign.interval}, {len(campaign.groups)} group(s)")
-            return
+        if not campaigns:
+            print("No campaigns configured.")
+        for campaign in campaigns.values():
+            status = "enabled" if campaign.enabled else "disabled"
+            print(f"{campaign.name}: {status}, every {campaign.interval}, {len(campaign.groups)} group(s)")
+        return
+    with edit_campaigns(path) as campaigns:
         if args.command == "add":
             if args.name in campaigns:
                 raise ValueError(f"campaign already exists: {args.name}")
@@ -72,7 +67,6 @@ def manage(args: argparse.Namespace) -> None:
                 del campaigns[args.name]
             else:
                 campaigns[args.name] = replace(campaign, enabled=args.command == "enable")
-        save_campaigns(path, campaigns)
     print(f"{args.command}: {args.name}")
 
 
@@ -83,8 +77,40 @@ def prompt_phone() -> str:
     return phone
 
 
+async def run_scheduler(args: argparse.Namespace, scheduler: Scheduler, path: Path, settings) -> None:
+    dispatch_lock = asyncio.Lock()
+    bot = None
+    disconnected = None
+    try:
+        if settings:
+            token, owners = settings
+            bot = make_client(args.data_dir, bot=True)
+            ControlBot(path, scheduler, dispatch_lock, owners).register(bot)
+            await bot.start(bot_token=token)
+            disconnected = bot.disconnected
+            log.info("Telegram control bot started")
+        log.info("Scheduler started; campaign changes are picked up between passes")
+        while True:
+            if disconnected is not None and disconnected.done():
+                await disconnected
+                raise ValueError("Telegram control bot disconnected")
+            async with dispatch_lock:
+                if bot is None or not scheduler.state.restricted:
+                    try:
+                        await scheduler.dispatch(list(load_campaigns(path).values()))
+                    except ACCOUNT_RESTRICTIONS:
+                        if bot is None:
+                            raise
+                        log.error("Telegram restricted the account; sending is paused but control bot remains available")
+            await asyncio.sleep(POLL_INTERVAL)
+    finally:
+        if bot is not None:
+            await bot.disconnect()
+
+
 async def telegram_command(args: argparse.Namespace) -> int:
     path = args.data_dir / "campaigns.json"
+    settings = control_settings(args.data_dir) if args.command == "run" else None
     if args.command == "send-now":
         campaign = find_campaign(load_campaigns(path), args.name)
         if reason := campaign.message_length_error():
@@ -105,6 +131,9 @@ async def telegram_command(args: argparse.Namespace) -> int:
         if args.command == "login":
             print("Telegram session saved.")
             return 0
+        if args.command == "whoami":
+            print(account.id)
+            return 0
         directory = GroupDirectory(client)
         if args.command == "list-groups":
             await directory.refresh()
@@ -117,11 +146,8 @@ async def telegram_command(args: argparse.Namespace) -> int:
         scheduler = Scheduler(directory, Schedule(args.data_dir / "schedule.json"))
         if args.command == "send-now":
             return 0 if await scheduler.dispatch([campaign], force=True) else 1
-        log.info("Scheduler started; campaign changes are picked up between passes")
-        while True:
-            campaigns = load_campaigns(path)
-            await scheduler.dispatch(list(campaigns.values()))
-            await asyncio.sleep(POLL_INTERVAL)
+        await run_scheduler(args, scheduler, path, settings)
+        return 0
     finally:
         await client.disconnect()
 

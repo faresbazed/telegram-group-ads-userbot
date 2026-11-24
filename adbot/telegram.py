@@ -5,6 +5,7 @@ from time import monotonic
 
 from dotenv import dotenv_values
 from telethon import TelegramClient, errors, functions, types, utils
+from telethon.sessions import MemorySession
 
 from .config import group_ref
 
@@ -20,14 +21,29 @@ class Group:
     peer: types.TypeInputPeer
 
 
-def make_client(data_dir: Path) -> TelegramClient:
-    dotenv = dotenv_values(data_dir / ".env", interpolate=False)
-    api_id = os.environ.get("TELEGRAM_API_ID", dotenv.get("TELEGRAM_API_ID"))
-    api_hash = os.environ.get("TELEGRAM_API_HASH", dotenv.get("TELEGRAM_API_HASH"))
+def read_settings(data_dir: Path) -> dict[str, str | None]:
+    return {**dotenv_values(data_dir / ".env", interpolate=False), **os.environ}
+
+
+def control_settings(data_dir: Path) -> tuple[str, frozenset[int]] | None:
+    settings = read_settings(data_dir)
+    token = (settings.get("BOT_TOKEN") or "").strip()
+    if not token:
+        return None
+    ids = [part.strip() for part in (settings.get("OWNER_ID") or "").split(",")]
+    if any(not part.isascii() or not part.isdecimal() or len(part) > 19 or int(part) <= 0 for part in ids):
+        raise ValueError("set OWNER_ID to one or more comma-separated positive Telegram user IDs when BOT_TOKEN is set")
+    return token, frozenset(map(int, ids))
+
+
+def make_client(data_dir: Path, *, bot: bool = False) -> TelegramClient:
+    settings = read_settings(data_dir)
+    api_id = settings.get("TELEGRAM_API_ID")
+    api_hash = settings.get("TELEGRAM_API_HASH")
     if not api_id or not api_id.isascii() or not api_id.isdecimal() or not int(api_id) or not api_hash:
         raise ValueError("set TELEGRAM_API_ID and TELEGRAM_API_HASH in the environment or the data directory's .env")
     return TelegramClient(
-        str(data_dir / "account"), int(api_id), api_hash,
+        MemorySession() if bot else str(data_dir / "account"), int(api_id), api_hash,
         flood_sleep_threshold=0, raise_last_call_error=True,
     )
 
@@ -55,9 +71,13 @@ class GroupDirectory:
         self.lookups.clear()
         self.expires = monotonic() + 60
 
-    async def resolve(self, target: str) -> Group | None:
+    async def joined(self) -> dict[int, Group]:
         if monotonic() >= self.expires:
             await self.refresh()
+        return self.groups
+
+    async def resolve(self, target: str) -> Group | None:
+        await self.joined()
         reference = group_ref(target)
         if reference not in self.lookups:
             self.lookups[reference] = await self.lookup(*reference)

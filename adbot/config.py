@@ -1,8 +1,11 @@
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+
+from filelock import FileLock
 
 
 INTERVAL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -44,6 +47,11 @@ def group_ref(value: str) -> tuple[str, str]:
     raise ValueError("group must be an ID, @username or t.me link")
 
 
+def validate_campaign_name(name: str) -> None:
+    if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", name):
+        raise ValueError("campaign name must have 1–64 letters, digits, underscores or hyphens")
+
+
 @dataclass(frozen=True)
 class Campaign:
     name: str
@@ -53,8 +61,7 @@ class Campaign:
     enabled: bool = True
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", self.name):
-            raise ValueError("campaign name must have 1–64 letters, digits, underscores or hyphens")
+        validate_campaign_name(self.name)
         if not isinstance(self.message, str) or not self.message.strip():
             raise ValueError("campaign message must not be blank")
         if not isinstance(self.groups, list) or not self.groups:
@@ -111,3 +118,18 @@ def load_campaigns(path: Path) -> dict[str, Campaign]:
 
 def save_campaigns(path: Path, campaigns: dict[str, Campaign]) -> None:
     write_json(path, [asdict(campaign) for campaign in campaigns.values()])
+
+
+def find_campaign(campaigns: dict[str, Campaign], name: str) -> Campaign:
+    try:
+        return campaigns[name]
+    except KeyError:
+        raise ValueError(f"unknown campaign: {name}") from None
+
+
+@contextmanager
+def edit_campaigns(path: Path, *, timeout: int = 5):
+    with FileLock(path.with_suffix(".lock"), timeout=timeout, mode=0o600):
+        campaigns = load_campaigns(path)
+        yield campaigns
+        save_campaigns(path, campaigns)
