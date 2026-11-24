@@ -10,7 +10,8 @@ MAX_MESSAGE_LENGTH = 4096
 GROUP_LINK = re.compile(r"(?:https?://)?t\.me/(.+)", re.IGNORECASE)
 USERNAME = re.compile(r"[a-zA-Z0-9_]+")
 INVITE = re.compile(r"(?:\+|joinchat/)([a-zA-Z0-9_-]+)")
-PRIVATE_LINK = re.compile(r"c/([1-9][0-9]*)(?:/[1-9][0-9]*)?")
+MESSAGE_PATH = re.compile(r"[1-9][0-9]*(?:/[1-9][0-9]*)?")
+PRIVATE_LINK = re.compile(rf"c/([1-9][0-9]*)(?:/{MESSAGE_PATH.pattern})?")
 
 
 def parse_interval(value: str) -> int:
@@ -37,8 +38,8 @@ def group_ref(value: str) -> tuple[str, str]:
             return "invite", invite[1]
         if private := PRIVATE_LINK.fullmatch(path):
             return "channel_id", private[1]
-        username, sep, message_id = path.partition("/")
-        if USERNAME.fullmatch(username) and (not sep or re.fullmatch(r"[1-9][0-9]*", message_id)):
+        username, sep, message_path = path.partition("/")
+        if USERNAME.fullmatch(username) and (not sep or MESSAGE_PATH.fullmatch(message_path)):
             return "username", username.lower()
     raise ValueError("group must be an ID, @username or t.me link")
 

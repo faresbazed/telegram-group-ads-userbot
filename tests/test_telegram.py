@@ -34,6 +34,8 @@ class GroupDirectoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(expected)
         self.assertEqual(await directory.resolve(str(expected.id)), expected)
         self.assertEqual(await directory.resolve("https://t.me/c/10/1"), expected)
+        self.assertEqual(await directory.resolve("https://t.me/Example_Group/1/2"), expected)
+        self.assertEqual(await directory.resolve("https://t.me/c/10/1/2"), expected)
         self.assertEqual(await directory.resolve("https://t.me/+ExampleInvite"), expected)
         self.assertIsNone(await directory.resolve("@example_channel"))
         self.assertIsNone(await directory.resolve("@left_group"))
