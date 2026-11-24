@@ -5,11 +5,16 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from adbot.__main__ import main
+from adbot.__main__ import main, prompt_phone
 from adbot.config import load_campaigns, write_json
 
 
 class CliTests(unittest.TestCase):
+    def test_installer_can_supply_a_phone_without_another_prompt(self):
+        with patch.dict("os.environ", {"TELEGRAM_PHONE": "+15551234567"}), patch("builtins.input") as prompt:
+            self.assertEqual(prompt_phone(), "15551234567")
+            prompt.assert_not_called()
+
     def test_cli_can_manage_but_not_send_an_oversized_saved_campaign(self):
         with tempfile.TemporaryDirectory() as directory, patch("adbot.__main__.os.umask"):
             args = ["--data-dir", directory]

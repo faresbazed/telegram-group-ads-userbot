@@ -4,7 +4,61 @@ Schedule recurring text ads from your own Telegram account to groups you select.
 
 **Only post where group administrators allow automated ads.** Follow the group rules and [Telegram's Terms of Service](https://telegram.org/tos). Repeated or unwanted messages can get your account restricted. Telegram may impose additional limits at any time.
 
-## Set up
+## Install on a VPS
+
+Use Ubuntu 22.04+, Debian 12+, or another version with Python 3.10 or newer. Connect with a non-root SSH user that has `sudo` access:
+
+```sh
+ssh ubuntu@YOUR_VPS_IP
+sudo apt-get update
+sudo apt-get install -y git
+git clone https://github.com/faresbazed/telegram-group-ads-userbot.git
+cd telegram-group-ads-userbot
+./install.sh
+```
+
+The installer asks for everything up front: your API ID and hash ([my.telegram.org](https://my.telegram.org) → **API development tools**), your phone number with country code, and optionally a token from [@BotFather](https://t.me/BotFather) (`/newbot`). If you supply a token, leave the owner ID blank to use the Telegram account you sign in with, or enter a comma-separated list of numeric Telegram user IDs to explicitly grant others full campaign control. You can also enter a first campaign; it starts disabled.
+
+Answer **yes** to install `adbot.service` and start it at boot. The installer installs missing Python and venv packages, creates `.venv`, and writes a private `~/.config/adbot/.env`. Then it asks for the Telegram login code and your 2FA password if required. The phone number, login code, and 2FA password are not saved in `.env`. If you configured a bot token, open your bot in Telegram and send `/start` in a private chat. Only reasonably trusted people should be listed as owners.
+
+**Check status and logs** (when the system service was installed):
+
+```sh
+systemctl status adbot --no-pager
+sudo journalctl -u adbot -f
+```
+
+**Update** from your existing checkout to keep the same settings, Telegram session, and campaign data:
+
+```sh
+cd ~/telegram-group-ads-userbot
+git pull --ff-only
+.venv/bin/python -m pip install -r requirements.txt
+sudo systemctl restart adbot
+systemctl status adbot --no-pager
+```
+
+**Uninstall** the service:
+
+```sh
+sudo systemctl disable --now adbot
+sudo rm /etc/systemd/system/adbot.service
+sudo systemctl daemon-reload
+```
+
+You can then remove the checkout and its virtual environment. Keep `~/.config/adbot` if you want to retain your credentials, Telegram session, and campaigns. If you no longer need the session, revoke it from **Settings → Devices** in Telegram before deleting the data directory.
+
+### Unattended setup
+
+Inject `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from your deployment environment rather than entering secrets into shell history. Optionally inject `BOT_TOKEN` and `OWNER_ID`. With an existing authorized session in the data directory, run:
+
+```sh
+./install.sh --non-interactive --systemd
+```
+
+Any required privileged commands in this mode need passwordless or already-authorized `sudo`. First-time Telegram sign-in still requires the interactive code and, if enabled, a 2FA password. To only prepare the installation, run `./install.sh --non-interactive --skip-login --no-systemd`; provide `OWNER_ID` yourself if setting a bot token in this mode. Use `--data-dir DIR` to choose another data directory. The installer will not replace an existing `.env` without confirmation or `--replace-env`; use the update commands above for routine updates. To supply an optional first campaign non-interactively, set `ADBOT_CAMPAIGN_NAME`, `ADBOT_CAMPAIGN_MESSAGE`, `ADBOT_CAMPAIGN_INTERVAL`, and space-separated `ADBOT_CAMPAIGN_GROUPS`.
+
+## Manual setup
 
 Requires Python 3.10+. From the repository root:
 

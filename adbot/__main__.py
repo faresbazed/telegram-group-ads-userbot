@@ -71,7 +71,7 @@ def manage(args: argparse.Namespace) -> None:
 
 
 def prompt_phone() -> str:
-    phone = utils.parse_phone(input("Telegram phone number (including country code): "))
+    phone = utils.parse_phone(os.environ.get("TELEGRAM_PHONE") or input("Telegram phone number (including country code): "))
     if not phone:
         raise ValueError("enter a valid Telegram phone number")
     return phone
