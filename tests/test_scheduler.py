@@ -67,6 +67,18 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         await self.scheduler().dispatch([self.campaign])
         self.assertEqual(self.send.await_count, 4)
 
+    async def test_oversized_campaign_is_skipped_without_blocking_other_sends(self):
+        oversized = Campaign("oversized", "x" * 4097, ["@one"], "30m")
+        valid = Campaign("valid", "y" * 4096, ["@two"], "30m")
+        scheduler = self.scheduler()
+        with self.assertLogs("adbot.scheduler", level="ERROR") as logs:
+            self.assertFalse(await scheduler.dispatch([oversized, valid]))
+        self.assertIn("Skipping campaign oversized: message exceeds Telegram's 4096-character limit", logs.output[0])
+        with self.assertNoLogs("adbot.scheduler", level="ERROR"):
+            self.assertFalse(await scheduler.dispatch([oversized, valid]))
+        self.send.assert_awaited_once_with("peer2", valid.message, parse_mode=None)
+        self.assertNotIn("oversized", Schedule(self.path).attempts)
+
     async def test_flood_wait_persists_and_stops_other_groups(self):
         self.send.side_effect = [errors.FloodWaitError(request=None, capture=60), None, None]
         with self.assertLogs(level="WARNING"):

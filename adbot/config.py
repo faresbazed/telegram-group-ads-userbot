@@ -57,8 +57,6 @@ class Campaign:
             raise ValueError("campaign name must have 1–64 letters, digits, underscores or hyphens")
         if not isinstance(self.message, str) or not self.message.strip():
             raise ValueError("campaign message must not be blank")
-        if len(self.message) > MAX_MESSAGE_LENGTH:
-            raise ValueError(f"campaign message exceeds Telegram's {MAX_MESSAGE_LENGTH}-character limit")
         if not isinstance(self.groups, list) or not self.groups:
             raise ValueError("campaign must have at least one group")
         for group in self.groups:
@@ -66,6 +64,11 @@ class Campaign:
         parse_interval(self.interval)
         if not isinstance(self.enabled, bool):
             raise ValueError("campaign enabled must be true or false")
+
+    def message_length_error(self) -> str | None:
+        if len(self.message) > MAX_MESSAGE_LENGTH:
+            return f"campaign {self.name}: message exceeds Telegram's {MAX_MESSAGE_LENGTH}-character limit"
+        return None
 
 
 def read_json(path: Path, default):

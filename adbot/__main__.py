@@ -62,7 +62,10 @@ def manage(args: argparse.Namespace) -> None:
         if args.command == "add":
             if args.name in campaigns:
                 raise ValueError(f"campaign already exists: {args.name}")
-            campaigns[args.name] = Campaign(args.name, args.message, args.group, args.interval, not args.disabled)
+            campaign = Campaign(args.name, args.message, args.group, args.interval, not args.disabled)
+            if reason := campaign.message_length_error():
+                raise ValueError(reason)
+            campaigns[args.name] = campaign
         else:
             campaign = find_campaign(campaigns, args.name)
             if args.command == "remove":
@@ -84,6 +87,8 @@ async def telegram_command(args: argparse.Namespace) -> int:
     path = args.data_dir / "campaigns.json"
     if args.command == "send-now":
         campaign = find_campaign(load_campaigns(path), args.name)
+        if reason := campaign.message_length_error():
+            raise ValueError(reason)
         if not campaign.enabled:
             raise ValueError("enable the campaign before sending")
     client = make_client(args.data_dir)

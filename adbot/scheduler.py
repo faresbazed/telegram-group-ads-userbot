@@ -67,6 +67,7 @@ class Scheduler:
         self.clock = clock
         self.pause = pause
         self.unresolved = set()
+        self.oversized_campaigns: set[str] = set()
 
     def flood_wait(self, seconds: int) -> None:
         self.state.flood_until = self.clock() + max(seconds, 1)
@@ -85,9 +86,17 @@ class Scheduler:
             if force:
                 log.warning("Cannot send during an active Telegram flood wait")
             return False
+        self.oversized_campaigns.intersection_update(campaign.name for campaign in campaigns if campaign.enabled)
         for campaign in campaigns:
             if not campaign.enabled:
                 continue
+            if reason := campaign.message_length_error():
+                if force or campaign.name not in self.oversized_campaigns:
+                    log.error("Skipping %s", reason)
+                    self.oversized_campaigns.add(campaign.name)
+                complete = False
+                continue
+            self.oversized_campaigns.discard(campaign.name)
             seen = set()
             for index, target in enumerate(campaign.groups, start=1):
                 reference = (campaign.name, index, target)

@@ -23,16 +23,15 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             group_ref("https://example.org/Example_Group")
 
-    def test_campaign_message_limit_is_enforced_on_creation_and_load(self):
+    def test_loading_keeps_oversized_campaigns(self):
         valid = Campaign("sale", "x" * 4096, ["@group"], "2h")
-        too_long = {**vars(valid), "message": valid.message + "y"}
-        with self.assertRaisesRegex(ValueError, "4096-character limit"):
-            Campaign(**too_long)
+        too_long = {**vars(valid), "name": "oversized", "message": valid.message + "y"}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "campaigns.json"
-            write_json(path, [too_long])
-            with self.assertRaisesRegex(ValueError, "4096-character limit"):
-                load_campaigns(path)
+            write_json(path, [too_long, vars(valid)])
+            campaigns = load_campaigns(path)
+        self.assertEqual(campaigns["oversized"].message, too_long["message"])
+        self.assertEqual(campaigns["sale"], valid)
 
     def test_config_round_trip_and_validation(self):
         campaign = Campaign("weekend", "Sale 🎉", ["@group", "-123"], "2h", False)
