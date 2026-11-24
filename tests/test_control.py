@@ -1,12 +1,13 @@
 import asyncio
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from adbot.__main__ import run_scheduler
-from adbot.config import load_campaigns
+from adbot.config import edit_campaigns, load_campaigns
 from adbot.control import ControlBot, record_key
 from adbot.scheduler import Schedule, Scheduler
 from adbot.telegram import Group, control_settings
@@ -143,6 +144,18 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.send.await_count, 1)
         self.state.restricted = True
         self.assertIn("restricted", (await self.text("/status")).args[0])
+
+    async def test_group_edits_dedupe_and_remove_all_aliases_by_chat(self):
+        await self.create()
+        await self.text("/addgroup weekend")
+        await self.text("-20 -21")
+        self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["@ads_group", "-21"])
+
+        with edit_campaigns(self.path) as campaigns:
+            campaigns["weekend"] = replace(campaigns["weekend"], groups=["@ads_group", "-20", "-21"])
+        await self.text("/removegroup weekend")
+        await self.text("@ads_group")
+        self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["-21"])
 
     async def test_runner_registers_and_disconnects_optional_control_client(self):
         client = SimpleNamespace(

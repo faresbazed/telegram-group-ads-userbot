@@ -61,13 +61,6 @@ def targets(value: str) -> list[str]:
     return result
 
 
-def merge_targets(existing: list[str], additions: list[str]) -> list[str]:
-    result = dict((group_ref(target), target) for target in existing)
-    for target in additions:
-        result.setdefault(group_ref(target), target)
-    return list(result.values())
-
-
 @dataclass
 class View:
     text: str
@@ -229,7 +222,7 @@ class ControlBot:
             flow.interval, flow.step = text.strip(), "new_groups"
             return self.group_prompt(flow)
         if flow.step == "new_groups":
-            return self.create(owner, flow, merge_targets(flow.groups, targets(text)))
+            return await self.create(owner, flow, flow.groups + targets(text))
         if flow.step in {"add_group", "remove_group"}:
             return await self.update_groups(owner, flow, targets(text))
         if flow.step == "text":
@@ -302,7 +295,8 @@ class ControlBot:
             )
         raise ValueError("Unknown action. Open /start to see the menu.")
 
-    def create(self, owner: int, flow: Flow, groups: list[str]) -> View:
+    async def create(self, owner: int, flow: Flow, groups: list[str]) -> View:
+        groups = self.unique_targets(groups, await self.target_keys(groups))
         campaign = Campaign(flow.name, flow.text, groups, flow.interval, enabled=False)
         with edit_campaigns(self.path, timeout=0) as campaigns:
             if campaign.name in campaigns:
@@ -350,6 +344,23 @@ class ControlBot:
             self.scheduler.restrict_sending()
             raise
 
+    async def target_keys(self, selected: list[str]) -> list[tuple[str, str]]:
+        keys = {}
+        async with self.dispatch_lock:
+            for target in selected:
+                ref = group_ref(target)
+                if ref not in keys:
+                    group = await self.account_lookup(self.scheduler.directory.resolve, target)
+                    keys[ref] = ("chat", str(group.id)) if group is not None else ref
+        return [keys[group_ref(target)] for target in selected]
+
+    @staticmethod
+    def unique_targets(targets: list[str], keys: list[tuple[str, str]]) -> list[str]:
+        result = {}
+        for target, key in zip(targets, keys):
+            result.setdefault(key, target)
+        return list(result.values())
+
     async def group_callback(self, owner: int, action: str, key: str) -> View:
         flow = self.flows.get(owner)
         if flow is not None and flow.step == "remove_group":
@@ -365,7 +376,7 @@ class ControlBot:
         if flow is None or flow.step not in {"new_groups", "add_group"}:
             raise ValueError("Start a group selection from a campaign first.")
         if action == "save_groups" and flow.step == "new_groups":
-            return self.create(owner, flow, flow.groups)
+            return await self.create(owner, flow, flow.groups)
         if action not in {"groups", "pick"}:
             raise ValueError("That group selection has expired.")
         async with self.dispatch_lock:
@@ -381,43 +392,29 @@ class ControlBot:
             raise ValueError("That group is no longer in your joined list.")
         if flow.step == "add_group":
             return await self.update_groups(owner, flow, [key])
-        flow.groups = merge_targets(flow.groups, [key])
+        if key not in flow.groups:
+            flow.groups.append(key)
         return self.group_prompt(flow)
 
     async def update_groups(self, owner: int, flow: Flow, selected: list[str]) -> View:
+        current = find_campaign(load_campaigns(self.path), flow.name)
+        all_targets = current.groups + selected
+        keys = await self.target_keys(all_targets)
         if flow.step == "add_group":
-            with edit_campaigns(self.path, timeout=0) as campaigns:
-                current = find_campaign(campaigns, flow.name)
-                campaign = replace(current, groups=merge_targets(current.groups, selected))
-                campaigns[flow.name] = campaign
+            groups = self.unique_targets(all_targets, keys)
         else:
-            current = find_campaign(load_campaigns(self.path), flow.name)
-            refs = {group_ref(target): target for target in current.groups}
-            remove = set()
-            for target in selected:
-                ref = group_ref(target)
-                if ref in refs:
-                    remove.add(ref)
-                    continue
-                async with self.dispatch_lock:
-                    group = await self.account_lookup(self.scheduler.directory.resolve, target)
-                    matches = set()
-                    if group:
-                        for existing, group_target in refs.items():
-                            match = await self.account_lookup(self.scheduler.directory.resolve, group_target)
-                            if match is not None and match.id == group.id:
-                                matches.add(existing)
-                if not matches:
-                    raise ValueError("That group is not configured for the campaign.")
-                remove.update(matches)
-            with edit_campaigns(self.path, timeout=0) as campaigns:
-                if find_campaign(campaigns, flow.name) != current:
-                    raise ValueError("Campaign changed. Open it again before removing groups.")
-                remaining = [target for target in current.groups if group_ref(target) not in remove]
-                if not remaining:
-                    raise ValueError("A campaign must have at least one group. Add another group or delete the campaign.")
-                campaign = replace(current, groups=remaining)
-                campaigns[flow.name] = campaign
+            existing = keys[:len(current.groups)]
+            remove = set(keys[len(current.groups):])
+            if not remove.issubset(existing):
+                raise ValueError("That group is not configured for the campaign.")
+            groups = [target for target, key in zip(current.groups, existing) if key not in remove]
+            if not groups:
+                raise ValueError("A campaign must have at least one group. Add another group or delete the campaign.")
+        with edit_campaigns(self.path, timeout=0) as campaigns:
+            if find_campaign(campaigns, flow.name) != current:
+                raise ValueError("Campaign changed. Open it again before editing groups.")
+            campaign = replace(current, groups=groups)
+            campaigns[flow.name] = campaign
         self.flows.pop(owner, None)
         return self.details(campaign)
 
