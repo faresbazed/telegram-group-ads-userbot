@@ -43,7 +43,14 @@ cp "${0%/*}/venv-python" .venv/bin/python
         self.executable(bin_dir / "venv-python", """#!/bin/bash
 set -eu
 if [[ $2 = pip ]]; then
+    if [[ ${PIP_MISSING:-0} = 1 && ! -e $TRACE.pip-restored ]]; then exit 1; fi
+    if [[ $3 = --version ]]; then exit 0; fi
     echo pip >> "$TRACE"
+    exit 0
+fi
+if [[ $2 = ensurepip ]]; then
+    echo ensurepip >> "$TRACE"
+    touch "$TRACE.pip-restored"
     exit 0
 fi
 [[ $1 = -m && $2 = adbot && $3 = --data-dir && -n $TELEGRAM_API_ID && -n $TELEGRAM_API_HASH ]]
@@ -136,6 +143,14 @@ esac
         result = self.install("--no-systemd", "--replace-env")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("TELEGRAM_API_ID=12345\n", settings.read_text())
+
+    def test_existing_virtualenv_without_pip_is_repaired(self):
+        result = self.install("--skip-login")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.env["PIP_MISSING"] = "1"
+        result = self.install("--skip-login", "--replace-env")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.trace.read_text().splitlines(), ["venv", "pip", "ensurepip", "pip"])
 
     def test_existing_session_sets_owner_without_prompting(self):
         self.env["BOT_TOKEN"] = "123:offline-test-token"

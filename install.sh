@@ -169,6 +169,10 @@ fi
 cd -- "$repo"
 mkdir -p -- "$data_dir"
 if [[ ! -x .venv/bin/python ]]; then python3 -m venv .venv; fi
+if ! .venv/bin/python -m pip --version >/dev/null 2>&1; then
+    .venv/bin/python -m ensurepip --upgrade ||
+        die "could not restore pip in .venv; recreate the virtual environment and rerun setup"
+fi
 .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
 run=("$repo/.venv/bin/python" -m adbot --data-dir "$data_dir")
 
