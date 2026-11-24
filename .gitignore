@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.session
+*.session-*
+campaigns.json
+schedule.json
+*.lock
+*.tmp
+data/
+.pytest_cache/
