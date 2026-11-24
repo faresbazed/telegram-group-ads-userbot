@@ -106,6 +106,16 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             await self.scheduler().dispatch([self.campaign], force=True)
         self.assertEqual(self.send.await_count, 1)
 
+    async def test_public_group_sending_ban_pauses_all_campaigns(self):
+        self.send.side_effect = errors.UserBannedInChannelError(request=None)
+        with self.assertRaises(errors.UserBannedInChannelError):
+            await self.scheduler().dispatch([self.campaign])
+        self.assertTrue(Schedule(self.path).restricted)
+        another = Campaign("another", "announcement", ["@two"], "30m")
+        with self.assertRaisesRegex(ValueError, "sending is paused"):
+            await self.scheduler().dispatch([another], force=True)
+        self.assertEqual(self.send.await_count, 1)
+
     def test_corrupted_state_is_not_treated_as_fresh(self):
         write_json(self.path, {"attempts": [], "slow_until": {}, "flood_until": 0})
         with self.assertRaisesRegex(ValueError, "refusing to send"):

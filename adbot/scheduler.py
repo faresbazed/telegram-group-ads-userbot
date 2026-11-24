@@ -13,6 +13,7 @@ from .telegram import FLOOD_WAITS, GroupDirectory
 log = logging.getLogger(__name__)
 BETWEEN_GROUPS = 2
 POLL_INTERVAL = 5
+ACCOUNT_RESTRICTIONS = (errors.PeerFloodError, errors.UserBannedInChannelError)
 
 
 def timestamp(value) -> bool:
@@ -95,7 +96,7 @@ class Scheduler:
                 except FLOOD_WAITS as exc:
                     self.flood_wait(exc.seconds)
                     return False
-                except errors.PeerFloodError:
+                except ACCOUNT_RESTRICTIONS:
                     self.restrict_sending()
                     raise
                 except errors.UnauthorizedError:
@@ -142,7 +143,7 @@ class Scheduler:
                 except errors.ChatWriteForbiddenError:
                     log.warning("Telegram forbids writing to group %s; skipping %s this interval", key, campaign.name)
                     complete = False
-                except errors.PeerFloodError:
+                except ACCOUNT_RESTRICTIONS:
                     self.restrict_sending()
                     raise
                 except errors.UnauthorizedError:

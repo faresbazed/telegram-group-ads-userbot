@@ -9,7 +9,7 @@ from filelock import FileLock, Timeout
 from telethon import errors, utils
 
 from .config import Campaign, load_campaigns, save_campaigns
-from .scheduler import POLL_INTERVAL, Schedule, Scheduler
+from .scheduler import ACCOUNT_RESTRICTIONS, POLL_INTERVAL, Schedule, Scheduler
 from .telegram import FLOOD_WAITS, GroupDirectory, make_client
 
 
@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     except Timeout:
         log.error("Data directory is busy; stop the other adbot command or runner and try again")
-    except errors.PeerFloodError:
+    except ACCOUNT_RESTRICTIONS:
         log.error("Telegram restricted sending from this account. Stop and review the account's restrictions.")
     except FLOOD_WAITS as exc:
         log.error("Telegram requires a wait of %d seconds before retrying", exc.seconds)
