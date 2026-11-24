@@ -172,7 +172,7 @@ privileged() {
 
 if (( needs_deps )); then
     privileged apt-get update
-    DEBIAN_FRONTEND=noninteractive privileged apt-get install -y python3 python3-venv
+    privileged env DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv
     python_ready || die "this distribution did not provide Python 3.10+ with venv support"
 fi
 

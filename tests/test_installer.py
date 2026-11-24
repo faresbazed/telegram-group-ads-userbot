@@ -34,7 +34,10 @@ class InstallerTests(unittest.TestCase):
         }
         self.executable(bin_dir / "python3", """#!/bin/bash
 set -eu
-if [[ $1 = -c ]]; then exit 0; fi
+if [[ $1 = -c ]]; then
+    [[ ${PYTHON_DEPS_MISSING:-0} = 0 || -e $TRACE.deps-installed ]]
+    exit 0
+fi
 [[ "$*" = '-m venv .venv' ]]
 echo venv >> "$TRACE"
 mkdir -p .venv/bin
@@ -74,7 +77,9 @@ else
     shift
 fi
 if [[ "$*" = "${FAIL_PRIVILEGED:-}" ]]; then exit 1; fi
+unset DEBIAN_FRONTEND
 case "$1" in
+    apt-get|env) "$@" ;;
     install) [[ $6 = /etc/systemd/system/adbot.service ]]; cp -- "$5" "$UNIT" ;;
     systemctl) echo "$*" >> "$TRACE" ;;
     *) exit 1 ;;
@@ -202,6 +207,35 @@ esac
             "sudo-validate", "venv", "pip", "login", "systemctl daemon-reload",
             "systemctl enable --now adbot.service",
         ])
+
+    @unittest.skipIf(getattr(os, "geteuid", lambda: 0)() == 0, "requires a non-root test user")
+    def test_apt_install_sets_frontend_after_sudo(self):
+        release = Path("/etc/os-release")
+        if not release.is_file() or not any(
+            line.removeprefix("ID=").strip("\"'") in {"ubuntu", "debian"}
+            for line in release.read_text().splitlines() if line.startswith("ID=")
+        ):
+            self.skipTest("requires Ubuntu or Debian")
+        self.env["PYTHON_DEPS_MISSING"] = "1"
+        self.executable(self.repo.parent / "bin" / "apt-get", """#!/bin/bash
+set -eu
+case "$*" in
+    update) echo apt-update >> "$TRACE" ;;
+    'install -y python3 python3-venv')
+        [[ ${DEBIAN_FRONTEND:-} = noninteractive ]]
+        echo apt-install >> "$TRACE"
+        touch "$TRACE.deps-installed"
+        ;;
+    *) exit 1 ;;
+esac
+""")
+        result = subprocess.run(
+            [str(self.repo / "install.sh"), "--non-interactive", "--skip-login",
+             "--no-systemd", "--data-dir", str(self.data)],
+            env=self.env, cwd=self.repo.parent, capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.trace.read_text().splitlines(), ["apt-update", "apt-install", "venv", "pip"])
 
     @unittest.skipIf(getattr(os, "geteuid", lambda: 0)() == 0 or Path("/etc/systemd/system/adbot.service").exists(),
                      "requires a non-root test user without an installed adbot service")
