@@ -26,6 +26,16 @@ python -m adbot list-groups
 
 The data directory holds your credentials, Telegram session, campaigns and schedule state. A session file grants access to your account; keep it private and never commit or share it. For a second account or an isolated test, put `--data-dir PATH` before the subcommand and use a separate directory.
 
+## Manage campaigns in Telegram
+
+1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token into `BOT_TOKEN` in your data directory's `.env`. Keep the token private.
+2. After `python -m adbot login`, run `python -m adbot whoami` to get your numeric Telegram user ID. Set `OWNER_ID` to that ID. If you intentionally want to give additional Telegram users full control of your campaigns, add their numeric user IDs separated by commas.
+3. Run `python -m adbot run`, open your bot's **private** chat and send `/start`. The bot ignores group chats and users outside the allowlist. Leave `BOT_TOKEN` unset if you only want the CLI scheduler.
+
+Use **New campaign** to enter a name, ad text, interval, and one or more groups, or select groups your personal account has already joined. New campaigns created in Telegram are disabled until you enable them. From **Campaigns**, choose one to edit the ad or interval, add or remove groups, enable or disable it, try **Send now**, or delete it with confirmation. **Next sends** shows the schedule in UTC, and **Account status** shows Telegram-imposed pauses. Use `/help` for equivalent commands, or `/cancel` to exit a prompt.
+
+The bot saves changes to the same campaign file as the CLI. The runner picks them up between scheduling passes. Only your personal Telegram account posts the ads; the control bot does not need to join your groups.
+
 ## Manage and run campaigns
 
 ```sh

@@ -53,11 +53,13 @@ class Schedule:
             "restricted": self.restricted,
         })
 
-    def is_due(self, campaign: Campaign, group: str, now: float, force: bool = False) -> bool:
-        if now < max(self.flood_until, self.slow_until.get(group, 0)):
-            return False
+    def next_due(self, campaign: Campaign, group: str, force: bool = False) -> float:
         previous = self.attempts.get(campaign.name, {}).get(group)
-        return force or previous is None or now >= previous + parse_interval(campaign.interval)
+        scheduled = 0 if force or previous is None else previous + parse_interval(campaign.interval)
+        return max(scheduled, self.flood_until, self.slow_until.get(group, 0))
+
+    def is_due(self, campaign: Campaign, group: str, now: float, force: bool = False) -> bool:
+        return now >= self.next_due(campaign, group, force)
 
 
 class Scheduler:
