@@ -40,6 +40,7 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
             joined=AsyncMock(return_value={self.group.id: self.group, self.extra.id: self.extra}),
             resolve=AsyncMock(side_effect={
                 "@ads_group": self.group, "-20": self.group, "https://t.me/another": self.extra, "-21": self.extra,
+                "https://t.me/+AdsInvite": self.group,
             }.get),
             client=SimpleNamespace(send_message=self.send),
         )
@@ -150,13 +151,30 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         await self.create()
         await self.text("/addgroup weekend")
         await self.text("-20 -21")
-        self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["@ads_group", "-21"])
+        self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["-20", "-21"])
 
         with edit_campaigns(self.path) as campaigns:
             campaigns["weekend"] = replace(campaigns["weekend"], groups=["@ads_group", "-20", "-21"])
         await self.text("/removegroup weekend")
         await self.text("@ads_group")
         self.assertEqual(load_campaigns(self.path)["weekend"].groups, ["-21"])
+
+    async def test_add_group_prefers_stable_refs_without_touching_other_chats(self):
+        await self.create()
+        invite = "https://t.me/+AdsInvite"
+        untouched = ["https://t.me/another", "-21"]
+        for saved, addition, chosen in (
+            (invite, "-20", "-20"),
+            (invite, "@ads_group", "@ads_group"),
+            ("@ads_group", "-20", "-20"),
+            ("-20", invite, "-20"),
+        ):
+            with self.subTest(saved=saved, addition=addition):
+                with edit_campaigns(self.path) as campaigns:
+                    campaigns["weekend"] = replace(campaigns["weekend"], groups=[saved, *untouched])
+                await self.text("/addgroup weekend")
+                await self.text(addition)
+                self.assertEqual(load_campaigns(self.path)["weekend"].groups, [chosen, *untouched])
 
     async def test_group_picker_callbacks_cannot_edit_a_new_flow(self):
         first = await self.create()

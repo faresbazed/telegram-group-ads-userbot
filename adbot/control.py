@@ -23,6 +23,7 @@ from .telegram import FLOOD_WAITS
 
 
 PAGE_SIZE = 8
+TARGET_STABILITY = {"invite": 0, "username": 1, "channel_id": 2, "id": 3}
 ACTIONS = {
     "campaign": "view", "edit": "text", "interval": "interval",
     "addgroup": "add_group", "removegroup": "remove_group",
@@ -298,7 +299,7 @@ class ControlBot:
         raise ValueError("Unknown action. Open /start to see the menu.")
 
     async def create(self, owner: int, flow: Flow, groups: list[str]) -> View:
-        groups = self.unique_targets(groups, await self.target_keys(groups))
+        groups = await self.merge_targets([], groups)
         campaign = Campaign(flow.name, flow.text, groups, flow.interval, enabled=False)
         with edit_campaigns(self.path, timeout=0) as campaigns:
             if campaign.name in campaigns:
@@ -357,12 +358,24 @@ class ControlBot:
                     keys[ref] = ("chat", str(group.id)) if group is not None else ref
         return [keys[group_ref(target)] for target in selected]
 
-    @staticmethod
-    def unique_targets(targets: list[str], keys: list[tuple[str, str]]) -> list[str]:
-        result = {}
+    async def merge_targets(self, existing: list[str], additions: list[str]) -> list[str]:
+        targets = existing + additions
+        keys = await self.target_keys(targets)
+        touched = set(keys[len(existing):])
+        preferred: dict[tuple[str, str], tuple[int, str]] = {}
         for target, key in zip(targets, keys):
-            result.setdefault(key, target)
-        return list(result.values())
+            if key in touched:
+                rank = TARGET_STABILITY[group_ref(target)[0]]
+                if key not in preferred or rank > preferred[key][0]:
+                    preferred[key] = rank, target
+
+        result = []
+        for target, key in zip(targets, keys):
+            if key not in touched:
+                result.append(target)
+            elif key in preferred:
+                result.append(preferred.pop(key)[1])
+        return result
 
     async def group_callback(self, owner: int, action: str, payload: str) -> View:
         nonce, _, key = payload.partition(":")
@@ -409,11 +422,10 @@ class ControlBot:
 
     async def update_groups(self, owner: int, flow: Flow, selected: list[str]) -> View:
         current = find_campaign(load_campaigns(self.path), flow.name)
-        all_targets = current.groups + selected
-        keys = await self.target_keys(all_targets)
         if flow.step == "add_group":
-            groups = self.unique_targets(all_targets, keys)
+            groups = await self.merge_targets(current.groups, selected)
         else:
+            keys = await self.target_keys(current.groups + selected)
             existing = keys[:len(current.groups)]
             remove = set(keys[len(current.groups):])
             if not remove.issubset(existing):
