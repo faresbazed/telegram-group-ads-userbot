@@ -21,7 +21,7 @@ The installer asks for everything up front: your API ID and hash ([my.telegram.o
 
 Answer **yes** to install `adbot.service` and start it at boot. The installer installs missing Python and venv packages, creates `.venv`, and then asks for the Telegram login code and your 2FA password if required. It saves the new settings to a private `~/.config/adbot/.env` only after login and any initial campaign setup succeed. The phone number, login code, and 2FA password are not saved in `.env`. If you configured a bot token, open your bot in Telegram and send `/start` in a private chat. Only reasonably trusted people should be listed as owners.
 
-Service installation does not prompt for a sudo password after Telegram login. If your sudo policy requires one, authorize sudo just before running the installer (for example, `sudo -v`).
+When system packages are missing or you choose to install the service, the interactive installer runs `sudo -v` before Telegram login, so you can enter your sudo password up front. If that authorization expires during setup, sudo may prompt again.
 
 **Check status and logs** (when the system service was installed):
 

@@ -157,8 +157,12 @@ fi
 as_root=()
 if (( EUID != 0 )) && { (( needs_deps )) || [[ $service == yes ]]; }; then
     command -v sudo >/dev/null || die "sudo is required to install packages or the system service"
-    as_root=(sudo)
-    if (( non_interactive )); then as_root+=(-n); fi
+    if (( non_interactive )); then
+        as_root=(sudo -n)
+    else
+        sudo -v || die "could not authorize sudo to install packages or the system service"
+        as_root=(sudo)
+    fi
 fi
 
 privileged() {
@@ -225,7 +229,6 @@ unit_arg() {
 }
 
 if [[ $service == yes ]]; then
-    as_root=(sudo -n)
     temporary=$(mktemp "$data_dir/adbot.service.XXXXXX.tmp")
     printf '%s\n' '[Unit]' 'Description=Telegram group ads scheduler' 'Wants=network-online.target' 'After=network-online.target' \
         '' '[Service]' "User=$(id -un)" "WorkingDirectory=${repo//%/%%}" \

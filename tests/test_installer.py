@@ -63,8 +63,16 @@ if [[ $1 = whoami ]]; then echo 100; fi
         self.executable(bin_dir / "systemctl", "#!/bin/bash\nexit 1\n")
         self.executable(bin_dir / "sudo", """#!/bin/bash
 set -eu
-[[ $1 = -n ]]
-shift
+if [[ ${INTERACTIVE_SUDO:-0} = 1 ]]; then
+    [[ $1 != -n ]]
+    if [[ $1 = -v ]]; then
+        echo sudo-validate >> "$TRACE"
+        exit 0
+    fi
+else
+    [[ $1 = -n ]]
+    shift
+fi
 if [[ "$*" = "${FAIL_PRIVILEGED:-}" ]]; then exit 1; fi
 case "$1" in
     install) [[ $6 = /etc/systemd/system/adbot.service ]]; cp -- "$5" "$UNIT" ;;
@@ -171,6 +179,27 @@ esac
         self.assertIn("UMask=0077\n", unit)
         self.assertEqual(self.trace.read_text().splitlines(), [
             "venv", "pip", "whoami", "systemctl daemon-reload",
+            "systemctl enable --now adbot.service",
+        ])
+
+    @unittest.skipIf(getattr(os, "geteuid", lambda: 0)() == 0 or Path("/etc/systemd/system/adbot.service").exists(),
+                     "requires a non-root test user without an installed adbot service")
+    def test_interactive_service_authorizes_sudo_before_login(self):
+        self.env.update({"INTERACTIVE_SUDO": "1", "TELEGRAM_PHONE": "+15551234567"})
+        master, terminal = os.openpty()
+        try:
+            os.write(master, b"\n\n\n\ny\nn\n")
+            result = subprocess.run(
+                [str(self.repo / "install.sh"), "--skip-system-deps", "--data-dir", str(self.data)],
+                stdin=terminal, env=self.env, cwd=self.repo.parent,
+                capture_output=True, text=True, timeout=15,
+            )
+        finally:
+            os.close(terminal)
+            os.close(master)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.trace.read_text().splitlines(), [
+            "sudo-validate", "venv", "pip", "login", "systemctl daemon-reload",
             "systemctl enable --now adbot.service",
         ])
 
