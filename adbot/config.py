@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from filelock import FileLock
+from telethon.tl import types as tl
 
 
 INTERVAL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -52,6 +53,44 @@ def validate_campaign_name(name: str) -> None:
         raise ValueError("campaign name must have 1–64 letters, digits, underscores or hyphens")
 
 
+def serialize_entities(entities) -> list[dict] | None:
+    """Serialize Telethon message entities (bold, spoiler, custom emoji...) to JSON-safe dicts."""
+    result = []
+    for entity in entities or []:
+        to_dict = getattr(entity, "to_dict", None)
+        if to_dict is None:
+            continue
+        item = to_dict()
+        if isinstance(item, dict) and isinstance(item.get("_"), str):
+            result.append(item)
+    return result or None
+
+
+def deserialize_entities(data) -> list | None:
+    """Rebuild Telethon message entities from their stored dicts, skipping anything unrecognized."""
+    entities = []
+    for item in data or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("_")
+        cls = getattr(tl, name, None) if isinstance(name, str) and name.startswith("MessageEntity") else None
+        if cls is None:
+            continue
+        try:
+            entities.append(cls(**{key: value for key, value in item.items() if key != "_"}))
+        except (TypeError, ValueError):
+            continue
+    return entities or None
+
+
+def shift_entities(data, prefix: str) -> list[dict] | None:
+    """Move stored entities right by the length of prefix. Telegram offsets count UTF-16 code units."""
+    if not data:
+        return None
+    offset = len(prefix.encode("utf-16-le")) // 2
+    return [{**item, "offset": item["offset"] + offset} for item in data]
+
+
 @dataclass(frozen=True)
 class Campaign:
     name: str
@@ -59,6 +98,7 @@ class Campaign:
     groups: list[str]
     interval: str
     enabled: bool = True
+    entities: list[dict] | None = None
 
     def __post_init__(self) -> None:
         validate_campaign_name(self.name)
@@ -71,6 +111,18 @@ class Campaign:
         parse_interval(self.interval)
         if not isinstance(self.enabled, bool):
             raise ValueError("campaign enabled must be true or false")
+        if self.entities is not None:
+            valid = isinstance(self.entities, list) and all(
+                isinstance(item, dict)
+                and isinstance(item.get("_"), str)
+                and isinstance(item.get("offset"), int)
+                and isinstance(item.get("length"), int)
+                and item["offset"] >= 0
+                and item["length"] > 0
+                for item in self.entities
+            )
+            if not valid:
+                raise ValueError("campaign entities must be serialized Telegram message entities")
 
     def message_length_error(self) -> str | None:
         if len(self.message) > MAX_MESSAGE_LENGTH:

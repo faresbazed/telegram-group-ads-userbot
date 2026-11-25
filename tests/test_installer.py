@@ -208,6 +208,23 @@ esac
             "systemctl enable --now adbot.service",
         ])
 
+    def test_qr_login_needs_no_phone_and_passes_the_flag(self):
+        master, terminal = os.openpty()
+        try:
+            os.write(master, b"\n\n\nn\n")
+            result = subprocess.run(
+                [str(self.repo / "install.sh"), "--qr-login", "--no-systemd", "--skip-system-deps",
+                 "--data-dir", str(self.data)],
+                stdin=terminal, env=self.env, cwd=self.repo.parent,
+                capture_output=True, text=True, timeout=15,
+            )
+        finally:
+            os.close(terminal)
+            os.close(master)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.trace.read_text().splitlines(), ["venv", "pip", "login", "--qr"])
+        self.assertNotIn("TELEGRAM_PHONE", (self.data / ".env").read_text())
+
     @unittest.skipIf(getattr(os, "geteuid", lambda: 0)() == 0, "requires a non-root test user")
     def test_apt_install_sets_frontend_after_sudo(self):
         release = Path("/etc/os-release")

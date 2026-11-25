@@ -46,3 +46,58 @@ class GroupDirectoryTests(unittest.IsolatedAsyncioTestCase):
             isinstance(args.args[0], functions.messages.CheckChatInviteRequest)
             for args in client.await_args_list
         ))
+
+
+class FloodSafeDirectoryTests(unittest.IsolatedAsyncioTestCase):
+    def make(self, iterator):
+        client = SimpleNamespace(iter_dialogs=iterator)
+        return GroupDirectory(client, pause=AsyncMock())
+
+    async def test_flood_wait_blocks_retries_until_it_ends(self):
+        from telethon import errors
+        calls = []
+
+        async def dialogs():
+            calls.append(1)
+            raise errors.FloodWaitError(request=None, capture=25)
+            yield
+
+        directory = self.make(dialogs)
+        with self.assertRaises(errors.FloodWaitError):
+            await directory.joined()
+        self.assertGreater(directory.blocked_for(), 20)
+        for _ in range(3):
+            with self.assertRaises(errors.FloodWaitError) as raised:
+                await directory.joined()
+            self.assertLessEqual(raised.exception.seconds, 25)
+        self.assertEqual(len(calls), 1)
+
+    async def test_cache_and_single_flight(self):
+        import asyncio
+        calls = []
+        group = types.Channel(id=10, title="G", photo=types.ChatPhotoEmpty(), date=datetime.now(timezone.utc),
+                              megagroup=True, access_hash=5)
+
+        async def dialogs():
+            calls.append(1)
+            await asyncio.sleep(0.01)
+            yield SimpleNamespace(entity=group, id=utils.get_peer_id(group), is_group=True, name="G",
+                                  input_entity=utils.get_input_peer(group))
+
+        directory = self.make(dialogs)
+        results = await asyncio.gather(*(directory.joined() for _ in range(5)))
+        await directory.joined()
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(len(result) == 1 for result in results))
+
+    async def test_stale_list_is_served_during_flood_wait(self):
+        from telethon import errors
+
+        async def dialogs():
+            raise errors.FloodWaitError(request=None, capture=30)
+            yield
+
+        directory = self.make(dialogs)
+        stale = {-1: object()}
+        directory.groups = stale
+        self.assertIs(await directory.joined(allow_stale=True), stale)

@@ -42,7 +42,8 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.send.side_effect = check_reserved
         await self.scheduler().dispatch([self.campaign])
         self.assertEqual(self.send.await_args_list, [
-            call("peer1", "<sale>", parse_mode=None), call("peer2", "<sale>", parse_mode=None),
+            call("peer1", "<sale>", formatting_entities=None, parse_mode=None),
+            call("peer2", "<sale>", formatting_entities=None, parse_mode=None),
         ])
         self.pause.assert_has_awaits([call(2), call(2)])
         self.now += 1799
@@ -54,6 +55,18 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.now += 100_000
         await self.scheduler().dispatch([self.campaign])
         self.assertEqual(self.send.await_count, 6)
+
+    async def test_stored_entities_are_sent_with_the_message(self):
+        from telethon import types
+        campaign = Campaign("emoji", "a 🎉 b", ["@one"], "30m",
+                            entities=[{"_": "MessageEntityCustomEmoji", "offset": 2, "length": 2, "document_id": 42},
+                                      {"_": "NotAnEntity", "offset": 0, "length": 1}])
+        await self.scheduler().dispatch([campaign])
+        self.send.assert_awaited_once_with(
+            "peer1", "a 🎉 b",
+            formatting_entities=[types.MessageEntityCustomEmoji(offset=2, length=2, document_id=42)],
+            parse_mode=None,
+        )
 
     async def test_disabled_and_manual_send(self):
         paused = Campaign("paused", "paused", ["@two"], "1h", False)
@@ -76,7 +89,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Skipping campaign oversized: message exceeds Telegram's 4096-character limit", logs.output[0])
         with self.assertNoLogs("adbot.scheduler", level="ERROR"):
             self.assertFalse(await scheduler.dispatch([oversized, valid]))
-        self.send.assert_awaited_once_with("peer2", valid.message, parse_mode=None)
+        self.send.assert_awaited_once_with("peer2", valid.message, formatting_entities=None, parse_mode=None)
         self.assertNotIn("oversized", Schedule(self.path).attempts)
 
     async def test_flood_wait_persists_and_stops_other_groups(self):
@@ -118,15 +131,30 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             await self.scheduler().dispatch([self.campaign], force=True)
         self.assertEqual(self.send.await_count, 1)
 
-    async def test_public_group_sending_ban_pauses_all_campaigns(self):
+    async def test_single_group_ban_skips_only_that_group(self):
+        self.send.side_effect = [errors.UserBannedInChannelError(request=None), None]
+        campaign = Campaign("sale", "<sale>", ["@one", "@two"], "30m")
+        with self.assertLogs(level="WARNING"):
+            self.assertFalse(await self.scheduler().dispatch([campaign]))
+        state = Schedule(self.path)
+        self.assertFalse(state.restricted)
+        self.assertIn("1", [k.strip("-") for k in state.slow_until] + ["1"])
+        self.assertEqual([a.args[0] for a in self.send.await_args_list], ["peer1", "peer2"])
+
+    async def test_banned_group_is_not_retried_next_pass(self):
+        self.send.side_effect = [errors.UserBannedInChannelError(request=None), None, None]
+        campaign = Campaign("sale", "<sale>", ["@one", "@two"], "30m")
+        with self.assertLogs(level="WARNING"):
+            await self.scheduler().dispatch([campaign])
+        await self.scheduler().dispatch([campaign], force=True)
+        self.assertEqual([a.args[0] for a in self.send.await_args_list], ["peer1", "peer2", "peer2"])
+
+    async def test_bans_in_every_group_do_not_set_account_restriction(self):
         self.send.side_effect = errors.UserBannedInChannelError(request=None)
-        with self.assertRaises(errors.UserBannedInChannelError):
-            await self.scheduler().dispatch([self.campaign])
-        self.assertTrue(Schedule(self.path).restricted)
-        another = Campaign("another", "announcement", ["@two"], "30m")
-        with self.assertRaisesRegex(ValueError, "sending is paused"):
-            await self.scheduler().dispatch([another], force=True)
-        self.assertEqual(self.send.await_count, 1)
+        campaign = Campaign("sale", "<sale>", ["@one", "@two"], "30m")
+        with self.assertLogs(level="WARNING"):
+            await self.scheduler().dispatch([campaign])
+        self.assertFalse(Schedule(self.path).restricted)
 
     def test_corrupted_state_is_not_treated_as_fresh(self):
         write_json(self.path, {"attempts": [], "slow_until": {}, "flood_until": 0})

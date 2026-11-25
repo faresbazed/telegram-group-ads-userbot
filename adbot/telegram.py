@@ -1,3 +1,5 @@
+import asyncio
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +38,12 @@ def control_settings(data_dir: Path) -> tuple[str, frozenset[int]] | None:
     return token, frozenset(map(int, ids))
 
 
+def control_language(data_dir: Path) -> str:
+    """Control bot language: ADBOT_LANGUAGE=en for English, Arabic by default."""
+    value = (read_settings(data_dir).get("ADBOT_LANGUAGE") or "ar").strip().lower()
+    return "en" if value == "en" else "ar"
+
+
 def make_client(data_dir: Path, *, bot: bool = False) -> TelegramClient:
     settings = read_settings(data_dir)
     api_id = settings.get("TELEGRAM_API_ID")
@@ -48,32 +56,66 @@ def make_client(data_dir: Path, *, bot: bool = False) -> TelegramClient:
     )
 
 
+PAGE_SIZE = 100
+PAGE_PAUSE = 2.0
+CACHE_SECONDS = 600
+
+
 class GroupDirectory:
-    def __init__(self, client: TelegramClient):
+    """Joined-group list. Loading it pages through every chat of the account, which Telegram rate-limits,
+    so it is cached, paced, never loaded twice at once, and a flood wait blocks further tries until it ends."""
+
+    def __init__(self, client: TelegramClient, pause=asyncio.sleep):
         self.client = client
+        self.pause = pause
         self.groups: dict[int, Group] = {}
         self.lookups: dict[tuple[str, str], Group | None] = {}
         self.expires = 0.0
+        self.blocked_until = 0.0
+        self.loading = asyncio.Lock()
+
+    def blocked_for(self) -> int:
+        return max(0, math.ceil(self.blocked_until - monotonic()))
+
+    def block(self, seconds: int) -> None:
+        self.blocked_until = max(self.blocked_until, monotonic() + max(seconds, 1))
 
     async def refresh(self) -> None:
-        groups = {}
-        async for dialog in self.client.iter_dialogs():
-            entity = dialog.entity
-            if not dialog.is_group or not isinstance(entity, (types.Chat, types.Channel)):
-                continue
-            if any(getattr(entity, flag, False) for flag in ("left", "kicked", "deactivated", "migrated_to")):
-                continue
-            usernames = [username.username.lower() for username in getattr(entity, "usernames", []) or [] if username.active]
-            if username := getattr(entity, "username", None):
-                usernames.insert(0, username.lower())
-            groups[dialog.id] = Group(dialog.id, dialog.name, tuple(usernames), dialog.input_entity)
-        self.groups = groups
-        self.lookups.clear()
-        self.expires = monotonic() + 60
+        async with self.loading:
+            if monotonic() < self.expires:
+                return
+            if wait := self.blocked_for():
+                raise errors.FloodWaitError(request=None, capture=wait)
+            groups = {}
+            try:
+                count = 0
+                async for dialog in self.client.iter_dialogs():
+                    count += 1
+                    if count % PAGE_SIZE == 0:
+                        await self.pause(PAGE_PAUSE)
+                    entity = dialog.entity
+                    if not dialog.is_group or not isinstance(entity, (types.Chat, types.Channel)):
+                        continue
+                    if any(getattr(entity, flag, False) for flag in ("left", "kicked", "deactivated", "migrated_to")):
+                        continue
+                    usernames = [u.username.lower() for u in getattr(entity, "usernames", []) or [] if u.active]
+                    if username := getattr(entity, "username", None):
+                        usernames.insert(0, username.lower())
+                    groups[dialog.id] = Group(dialog.id, dialog.name, tuple(usernames), dialog.input_entity)
+            except FLOOD_WAITS as exc:
+                self.block(exc.seconds)
+                raise
+            self.groups = groups
+            self.lookups.clear()
+            self.expires = monotonic() + CACHE_SECONDS
 
-    async def joined(self) -> dict[int, Group]:
+    async def joined(self, allow_stale: bool = False) -> dict[int, Group]:
         if monotonic() >= self.expires:
-            await self.refresh()
+            try:
+                await self.refresh()
+            except FLOOD_WAITS:
+                if not (allow_stale and self.groups):
+                    raise
         return self.groups
 
     async def resolve(self, target: str) -> Group | None:

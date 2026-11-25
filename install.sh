@@ -6,6 +6,7 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 data_dir="${HOME}/.config/adbot"
 non_interactive=0
 skip_login=0
+qr_login=0
 skip_deps=0
 replace_env=0
 service=ask
@@ -14,6 +15,7 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' 'Usage: ./install.sh [--data-dir DIR] [--systemd | --no-systemd]' \
         '                    [--non-interactive] [--skip-login] [--skip-system-deps] [--replace-env]' \
+        '                    [--qr-login]' \
         'Non-interactive mode reads TELEGRAM_API_ID, TELEGRAM_API_HASH, BOT_TOKEN and OWNER_ID.' \
         'It requires an existing Telegram session unless --skip-login is specified.'
 }
@@ -27,6 +29,7 @@ while (($#)); do
             ;;
         --non-interactive) non_interactive=1 ;;
         --skip-login) skip_login=1 ;;
+        --qr-login) qr_login=1 ;;
         --skip-system-deps) skip_deps=1 ;;
         --replace-env) replace_env=1 ;;
         --systemd) service=yes ;;
@@ -68,7 +71,7 @@ if (( ! non_interactive )); then
     printf '%s\n' 'Telegram adbot setup. All configuration choices come first.'
     ask TELEGRAM_API_ID 'API ID from my.telegram.org → API development tools'
     ask TELEGRAM_API_HASH 'API hash from my.telegram.org → API development tools' 1
-    if (( ! skip_login )); then
+    if (( ! skip_login && ! qr_login )); then
         ask TELEGRAM_PHONE 'Phone number with country code, e.g. +15551234567'
     fi
     ask BOT_TOKEN 'Token from @BotFather /newbot (blank for CLI-only)' 1
@@ -96,7 +99,7 @@ if [[ ! $api_id =~ ^[1-9][0-9]{0,9}$ ]] || (( api_id > 2147483647 )); then
     die "TELEGRAM_API_ID must be a positive 32-bit integer from my.telegram.org"
 fi
 [[ $api_hash =~ ^[[:xdigit:]]{32}$ ]] || die "TELEGRAM_API_HASH must be the 32-character hexadecimal hash from my.telegram.org"
-if [[ -n $phone ]] || (( ! non_interactive && ! skip_login )); then
+if [[ -n $phone ]] || (( ! non_interactive && ! skip_login && ! qr_login )); then
     [[ $phone =~ ^\+[1-9][0-9]{5,14}$ ]] || die "TELEGRAM_PHONE must include the country code, e.g. +15551234567"
 fi
 if [[ -n $bot_token ]]; then
@@ -129,7 +132,6 @@ if [[ -e $data_dir/.env || -L $data_dir/.env ]] && (( ! replace_env )); then
 fi
 if [[ $service == yes ]]; then
     (( ! skip_login )) || die "--systemd requires a Telegram session; do not combine it with --skip-login"
-    (( EUID != 0 )) || die "run as a normal sudo-enabled user, not root, to install the service"
     command -v systemctl >/dev/null || die "systemctl is not available on this VPS"
     [[ ! -e /etc/systemd/system/adbot.service && ! -L /etc/systemd/system/adbot.service ]] ||
         die "adbot.service already exists; see the README for updating an installation"
@@ -201,7 +203,11 @@ write_settings
 if (( ! skip_login )); then
     if (( ! non_interactive )); then
         printf '%s\n' 'Sign in now using the Telegram code and, if enabled, your 2FA password.'
-        TELEGRAM_PHONE="$phone" run_setup login
+        if (( qr_login )); then
+            run_setup login --qr
+        else
+            TELEGRAM_PHONE="$phone" run_setup login
+        fi
     fi
     if (( non_interactive )) || [[ -n $bot_token && -z $owner_id ]]; then
         account_id=$(run_setup whoami) || die "Telegram login is required; run the installer interactively or use --skip-login without --systemd"

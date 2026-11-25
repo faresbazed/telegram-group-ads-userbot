@@ -6,7 +6,7 @@ from time import time
 
 from telethon import errors
 
-from .config import Campaign, parse_interval, read_json, write_json
+from .config import Campaign, deserialize_entities, parse_interval, read_json, write_json
 from .telegram import FLOOD_WAITS, GroupDirectory
 
 
@@ -29,8 +29,10 @@ class Schedule:
             self.slow_until: dict[str, float] = data["slow_until"]
             self.flood_until: float = data["flood_until"]
             self.restricted = data.get("restricted", False)
+            self.paused = data.get("paused", False)
             valid = (
                 isinstance(self.restricted, bool)
+                and isinstance(self.paused, bool)
                 and timestamp(self.flood_until)
                 and isinstance(self.slow_until, dict)
                 and all(timestamp(value) for value in self.slow_until.values())
@@ -51,6 +53,7 @@ class Schedule:
             "slow_until": self.slow_until,
             "flood_until": self.flood_until,
             "restricted": self.restricted,
+            "paused": self.paused,
         })
 
     def next_due(self, campaign: Campaign, group: str, force: bool = False) -> float:
@@ -83,6 +86,10 @@ class Scheduler:
     async def dispatch(self, campaigns: list[Campaign], *, force: bool = False) -> bool:
         if self.state.restricted:
             raise ValueError("sending is paused; review the account restriction before resuming")
+        if self.state.paused:
+            if force:
+                raise ValueError("Sending is paused. Resume it before sending.")
+            return False
         complete = True
         if self.clock() < self.state.flood_until:
             if force:
@@ -107,7 +114,12 @@ class Scheduler:
                 except FLOOD_WAITS as exc:
                     self.flood_wait(exc.seconds)
                     return False
-                except ACCOUNT_RESTRICTIONS:
+                except errors.UserBannedInChannelError as exc:
+                    log.warning("Telegram refused lookup of group %d for %s (%s); skipping that group only", index, campaign.name, type(exc).__name__)
+                    complete = False
+                    continue
+                except errors.PeerFloodError as exc:
+                    log.error("Telegram %s during lookup of group %d for %s; pausing all sending", type(exc).__name__, index, campaign.name)
                     self.restrict_sending()
                     raise
                 except errors.UnauthorizedError:
@@ -137,7 +149,11 @@ class Scheduler:
                 attempts[key] = self.clock()
                 self.state.save()
                 try:
-                    await self.directory.client.send_message(group.peer, campaign.message, parse_mode=None)
+                    await self.directory.client.send_message(
+                        group.peer, campaign.message,
+                        formatting_entities=deserialize_entities(campaign.entities),
+                        parse_mode=None,
+                    )
                     log.info("Sent %s to group %s", campaign.name, key)
                 except (*FLOOD_WAITS, errors.SlowModeWaitError) as exc:
                     if previous is None:
@@ -154,7 +170,13 @@ class Scheduler:
                 except errors.ChatWriteForbiddenError:
                     log.warning("Telegram forbids writing to group %s; skipping %s this interval", key, campaign.name)
                     complete = False
-                except ACCOUNT_RESTRICTIONS:
+                except errors.UserBannedInChannelError as exc:
+                    self.state.slow_until[key] = self.clock() + 86400
+                    self.state.save()
+                    log.warning("Telegram refused send to group %s (%s); skipping that group for 24h, other groups continue", key, type(exc).__name__)
+                    complete = False
+                except errors.PeerFloodError as exc:
+                    log.error("Telegram %s sending to group %s; pausing all sending", type(exc).__name__, key)
                     self.restrict_sending()
                     raise
                 except errors.UnauthorizedError:

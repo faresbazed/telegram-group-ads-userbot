@@ -5,13 +5,15 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
+from getpass import getpass
+
 from filelock import FileLock, Timeout
 from telethon import errors, utils
 
 from .config import Campaign, edit_campaigns, find_campaign, load_campaigns
 from .control import ControlBot
 from .scheduler import ACCOUNT_RESTRICTIONS, POLL_INTERVAL, Schedule, Scheduler
-from .telegram import FLOOD_WAITS, GroupDirectory, control_settings, make_client
+from .telegram import FLOOD_WAITS, GroupDirectory, control_language, control_settings, make_client
 
 
 log = logging.getLogger(__name__)
@@ -22,7 +24,9 @@ def parser() -> argparse.ArgumentParser:
     cli.add_argument("--data-dir", type=Path, default=Path.home() / ".config" / "adbot",
                      help="directory for .env, Telegram session, campaigns and schedule state")
     commands = cli.add_subparsers(dest="command", required=True)
-    commands.add_parser("login", help="sign in to your Telegram account interactively")
+    login = commands.add_parser("login", help="sign in to your Telegram account interactively")
+    login.add_argument("--qr", action="store_true",
+                       help="sign in by scanning a QR code with an already signed-in Telegram app instead of a login code")
     commands.add_parser("list-groups", help="show joined Telegram groups and their IDs")
     commands.add_parser("whoami", help="show the logged-in Telegram user ID")
     add = commands.add_parser("add", help="add a campaign")
@@ -77,6 +81,53 @@ def prompt_phone() -> str:
     return phone
 
 
+QR_ATTEMPTS = 10
+
+
+def show_qr(url: str) -> None:
+    """Draw the QR with explicit black on white colors so it scans on any terminal theme."""
+    import qrcode
+
+    code = qrcode.QRCode(border=2)
+    code.add_data(url)
+    code.make(fit=True)
+    rows = code.get_matrix()
+    if len(rows) % 2:
+        rows.append([False] * len(rows[0]))
+    for top, bottom in zip(rows[::2], rows[1::2]):
+        line = "".join(f"\x1b[{30 if t else 97};{40 if b else 107}m\u2580" for t, b in zip(top, bottom))
+        print(line + "\x1b[0m")
+
+
+async def qr_login(client) -> None:
+    """Sign in by QR code. The login URL is a credential: it is only drawn as a QR, never printed or logged."""
+    await client.connect()
+    if await client.is_user_authorized():
+        return
+    qr = await client.qr_login()
+    for attempt in range(QR_ATTEMPTS):
+        print("Scan this QR code from a Telegram app that is already signed in:")
+        print("Settings > Devices > Link Desktop Device. The code changes about every 30 seconds.")
+        show_qr(qr.url)
+        try:
+            await qr.wait()
+            return
+        except asyncio.TimeoutError:
+            if attempt + 1 == QR_ATTEMPTS:
+                break
+            await qr.recreate()
+            print("The QR code expired; showing a new one.")
+        except errors.SessionPasswordNeededError:
+            for _ in range(3):
+                try:
+                    await client.sign_in(password=getpass("Two-step verification password: "))
+                    return
+                except errors.PasswordHashInvalidError:
+                    print("Wrong password. Try again.")
+            raise ValueError("two-step verification password was not accepted")
+    raise ValueError("QR login timed out. Run the same command again (installer: ./install.sh --qr-login)")
+
+
 async def run_scheduler(args: argparse.Namespace, scheduler: Scheduler, path: Path, settings) -> None:
     dispatch_lock = asyncio.Lock()
     bot = None
@@ -85,7 +136,7 @@ async def run_scheduler(args: argparse.Namespace, scheduler: Scheduler, path: Pa
         if settings:
             token, owners = settings
             bot = make_client(args.data_dir, bot=True)
-            ControlBot(path, scheduler, dispatch_lock, owners).register(bot)
+            ControlBot(path, scheduler, dispatch_lock, owners, lang=control_language(args.data_dir)).register(bot)
             await bot.start(bot_token=token)
             disconnected = bot.disconnected
             log.info("Telegram control bot started")
@@ -120,7 +171,10 @@ async def telegram_command(args: argparse.Namespace) -> int:
     client = make_client(args.data_dir)
     try:
         if args.command == "login":
-            await client.start(phone=prompt_phone)
+            if args.qr:
+                await qr_login(client)
+            else:
+                await client.start(phone=prompt_phone)
         else:
             await client.connect()
         account = await client.get_me()

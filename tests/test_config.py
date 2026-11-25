@@ -33,6 +33,29 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(campaigns["oversized"].message, too_long["message"])
         self.assertEqual(campaigns["sale"], valid)
 
+    def test_entities_round_trip_and_validation(self):
+        from telethon.tl import types
+        from adbot.config import deserialize_entities, serialize_entities, shift_entities
+        entities = [types.MessageEntityBold(offset=0, length=4),
+                    types.MessageEntitySpoiler(offset=5, length=3),
+                    types.MessageEntityCustomEmoji(offset=9, length=2, document_id=123)]
+        data = serialize_entities(entities)
+        campaign = Campaign("sale", "Sale now 🎉", ["@group"], "2h", entities=data)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaigns.json"
+            save_campaigns(path, {campaign.name: campaign})
+            self.assertEqual(load_campaigns(path), {campaign.name: campaign})
+        self.assertEqual(deserialize_entities(data), entities)
+        self.assertIsNone(serialize_entities([]))
+        self.assertIsNone(deserialize_entities([{"_": "Nope", "offset": 0, "length": 1}, "junk"]))
+        self.assertEqual(shift_entities(data, "ab"),
+                         [{**item, "offset": item["offset"] + 2} for item in data])
+        for bad in ([{"_": "MessageEntityBold", "offset": -1, "length": 1}],
+                    [{"_": "MessageEntityBold", "offset": 0}],
+                    "not-a-list"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                Campaign("sale", "Sale", ["@group"], "2h", entities=bad)
+
     def test_config_round_trip_and_validation(self):
         campaign = Campaign("weekend", "Sale 🎉", ["@group", "-123"], "2h", False)
         with tempfile.TemporaryDirectory() as directory:

@@ -11,15 +11,19 @@ from telethon import Button, errors, events
 from .config import (
     MAX_MESSAGE_LENGTH,
     Campaign,
+    deserialize_entities,
     edit_campaigns,
     find_campaign,
     group_ref,
     load_campaigns,
     parse_interval,
+    serialize_entities,
+    shift_entities,
     validate_campaign_name,
 )
-from .scheduler import ACCOUNT_RESTRICTIONS, Scheduler
+from .scheduler import Scheduler
 from .telegram import FLOOD_WAITS
+from .texts import HELP_AR, translate
 
 
 PAGE_SIZE = 8
@@ -27,6 +31,7 @@ ACTIONS = {
     "campaign": "view", "edit": "text", "interval": "interval",
     "addgroup": "add_group", "removegroup": "remove_group",
     "enable": "enable", "disable": "disable", "sendnow": "send", "delete": "delete", "next": "next",
+    "preview": "preview",
 }
 
 
@@ -66,6 +71,7 @@ def targets(value: str) -> list[str]:
 class View:
     text: str
     buttons: list = field(default_factory=list)
+    entities: list | None = None
 
 
 @dataclass
@@ -76,16 +82,20 @@ class Flow:
     interval: str = ""
     groups: list[str] = field(default_factory=list)
     confirmation: Campaign | None = None
+    entities: list | None = None
     nonce: str = field(default_factory=lambda: token_hex(8))
 
 
 class ControlBot:
-    def __init__(self, path: Path, scheduler: Scheduler, dispatch_lock: asyncio.Lock, owners: frozenset[int]):
+    def __init__(self, path: Path, scheduler: Scheduler, dispatch_lock: asyncio.Lock, owners: frozenset[int],
+                 lang: str = "en"):
+        self.lang = lang
         self.path = path
         self.scheduler = scheduler
         self.dispatch_lock = dispatch_lock
         self.owners = owners
         self.flows: dict[int, Flow] = {}
+        self.resume_nonce: str | None = None
         self.owner_locks = {owner: asyncio.Lock() for owner in owners}
 
     def register(self, bot) -> None:
@@ -99,8 +109,9 @@ class ControlBot:
         if not self.allowed(event):
             return
         owner = event.sender_id
+        message = getattr(event, "message", None)
         async with self.owner_locks[owner]:
-            await self.respond(event, self.message(owner, event.raw_text))
+            await self.respond(event, self.message(owner, event.raw_text, getattr(message, "entities", None)))
 
     async def on_callback(self, event) -> None:
         if not self.allowed(event):
@@ -117,24 +128,59 @@ class ControlBot:
             view = View(str(exc))
         except Timeout:
             view = View("Campaign settings are busy. Try again.")
-        except ACCOUNT_RESTRICTIONS:
+        except errors.UserBannedInChannelError:
+            view = View("Telegram refused access to that group. Other groups are not affected.")
+        except errors.PeerFloodError:
             view = View("Telegram restricted the personal account. Sending is paused; see Status.")
         except FLOOD_WAITS as exc:
-            view = View(f"Telegram requires waiting {exc.seconds} seconds. See Status before retrying.")
+            view = View(f"Telegram requires waiting {exc.seconds} seconds. Do not press again until then; the bot will not retry by itself.")
         except (errors.RPCError, OSError) as exc:
             view = View(f"Could not complete that action ({type(exc).__name__}). Try again or check the runner logs.")
-        await event.respond(view.text, buttons=view.buttons or None, parse_mode=None, link_preview=False)
+        for row in view.buttons:
+            for item in row:
+                item.text = self.t(item.text)
+        text = self.t(view.text)
+        entities = deserialize_entities(view.entities)
+        if not entities:
+            await event.respond(text, buttons=view.buttons or None, parse_mode=None, link_preview=False)
+            return
+        try:
+            await event.respond(text, buttons=view.buttons or None, formatting_entities=entities,
+                                parse_mode=None, link_preview=False)
+        except errors.RPCError:
+            # The control bot cannot send another account's custom emoji. Keep bold, spoiler and links;
+            # only fall back to plain text if Telegram still refuses.
+            kept = [e for e in entities if type(e).__name__ != "MessageEntityCustomEmoji"]
+            try:
+                if not kept:
+                    raise errors.RPCError(None, "no entities", 400)
+                await event.respond(text, buttons=view.buttons or None, formatting_entities=kept,
+                                    parse_mode=None, link_preview=False)
+            except errors.RPCError:
+                await event.respond(text, buttons=view.buttons or None, parse_mode=None, link_preview=False)
+
+    def t(self, text: str) -> str:
+        return translate(text, self.lang)
 
     def menu(self) -> View:
         return View("Telegram Group Ads", [
             [button("Campaigns", "list:0"), button("New campaign", "new")],
             [button("Account status", "status"), button("Help", "help")],
+            [self.pause_button()],
         ])
 
+    def pause_button(self):
+        if self.scheduler.state.paused:
+            return button("Resume all sending", "resume")
+        return button("Pause all sending", "pause")
+
     def help(self) -> View:
+        if self.lang == "ar":
+            return View(HELP_AR, [[button("Menu", "menu")]])
         return View(
             "/start — menu\n/list — campaigns\n/new — create a campaign\n/status — account status\n"
-            "/campaign NAME — manage a campaign\n/edit NAME — change ad text\n/interval NAME — change interval\n"
+            "/pause — stop all sending now\n/resume — resume all sending (asks to confirm)\n"
+            "/campaign NAME — manage a campaign\n/preview NAME — show the ad without sending\n/edit NAME — change ad text\n/interval NAME — change interval\n"
             "/addgroup NAME — add groups\n/removegroup NAME — remove groups\n"
             "/enable NAME or /disable NAME\n/sendnow NAME — send now\n/next NAME — next sends\n"
             "/delete NAME, then /confirm — delete\n/cancel — discard the current step",
@@ -172,19 +218,27 @@ class ControlBot:
             [button("Add groups", f"add_group:{key}"), button("Remove groups", f"remove_group:{key}")],
             [button("Disable", f"disable:{key}") if campaign.enabled else button("Enable", f"enable:{key}"),
              button("Next sends", f"next:{key}")],
-            [button("Send now", f"send:{key}"), button("Delete", f"delete:{key}")],
+            [button("Preview", f"preview:{key}"), button("Send now", f"send:{key}")],
+            [button("Delete", f"delete:{key}")],
             [button("Back to campaigns", "list:0")],
         ]
         message = campaign.message[:600] + ("…" if len(campaign.message) > 600 else "")
-        group_list = ", ".join(campaign.groups)
+        group_list = "\n".join(f"• \u2066{group}\u2069" for group in campaign.groups)
         group_list = group_list[:650] + ("…" if len(group_list) > 650 else "")
-        return View(f"{campaign.name} — {state}\nEvery {campaign.interval}\nGroups: {group_list}\n\n{message}", rows)
+        t = self.t
+        head = (f"{campaign.name} — {t(state)}\n{t('Every')} \u2066{campaign.interval}\u2069\n"
+                f"{t('Groups')}:\n{group_list}\n\n")
+        shown = campaign.entities
+        if shown and len(campaign.message) > 600:
+            limit = len(message[:600].encode("utf-16-le")) // 2
+            shown = [e for e in shown if e["offset"] + e["length"] <= limit]
+        return View(head + message, rows, entities=shift_entities(shown, head))
 
     def start(self, owner: int) -> View:
         self.flows[owner] = Flow("name")
         return View("Enter a new campaign name, for example weekend_sale.", [[button("Cancel", "menu")]])
 
-    async def message(self, owner: int, text: str) -> View:
+    async def message(self, owner: int, text: str, entities=None) -> View:
         head, _, tail = text.strip().partition(" ")
         command = head.split("@", 1)[0].lower()
         if command in ("/start", "/cancel"):
@@ -200,6 +254,10 @@ class ControlBot:
             return self.start(owner)
         if command == "/confirm":
             return self.confirm(owner)
+        if command == "/pause":
+            return self.pause()
+        if command == "/resume":
+            return self.ask_resume()
         if command.startswith("/") and command[1:] in ACTIONS:
             action = ACTIONS[command[1:]]
             name = tail.strip()
@@ -217,7 +275,7 @@ class ControlBot:
             flow.name, flow.step = name, "new_text"
             return View("Enter the ad text to post.")
         if flow.step == "new_text":
-            flow.text, flow.step = message_text(text), "new_interval"
+            flow.text, flow.entities, flow.step = message_text(text), serialize_entities(entities), "new_interval"
             return View("Enter an interval, for example 30m, 2h, or 1d.")
         if flow.step == "new_interval":
             parse_interval(text)
@@ -228,7 +286,7 @@ class ControlBot:
         if flow.step in {"add_group", "remove_group"}:
             return await self.update_groups(owner, flow, targets(text))
         if flow.step == "text":
-            changes = {"message": message_text(text)}
+            changes = {"message": message_text(text), "entities": serialize_entities(entities)}
         elif flow.step == "interval":
             parse_interval(text)
             changes = {"interval": text.strip()}
@@ -249,6 +307,12 @@ class ControlBot:
             return self.start(owner)
         if action == "status":
             return self.account_status()
+        if action == "pause":
+            return self.pause()
+        if action == "resume":
+            return self.ask_resume()
+        if action == "resume_yes":
+            return self.resume(key)
         if action == "confirm":
             flow = self.flows.get(owner)
             if flow is None or record_key(flow.name) != key:
@@ -268,6 +332,8 @@ class ControlBot:
             return self.details(campaign)
         if action == "next":
             return await self.next_sends(campaign)
+        if action == "preview":
+            return self.preview(campaign)
         if action in {"enable", "disable"}:
             return self.details(self.update(campaign.name, enabled=action == "enable"))
         if action in {"text", "interval", "add_group", "remove_group", "delete"}:
@@ -279,7 +345,7 @@ class ControlBot:
                 return View("Enter the new interval, for example 30m or 2h, or /cancel.")
             if action == "delete":
                 flow.confirmation = campaign
-                return View(f"Delete {campaign.name}? This removes the campaign from the schedule.", [
+                return View(self.t(f"Delete {campaign.name}? This removes the campaign from the schedule."), [
                     [button("Confirm delete", f"confirm:{record_key(campaign.name)}"), button("Cancel", "menu")],
                 ])
             return self.group_prompt(flow)
@@ -299,7 +365,7 @@ class ControlBot:
 
     async def create(self, owner: int, flow: Flow, groups: list[str]) -> View:
         groups = await self.merge_targets([], groups)
-        campaign = Campaign(flow.name, flow.text, groups, flow.interval, enabled=False)
+        campaign = Campaign(flow.name, flow.text, groups, flow.interval, enabled=False, entities=flow.entities)
         with edit_campaigns(self.path, timeout=0) as campaigns:
             if campaign.name in campaigns:
                 raise ValueError(f"Campaign already exists: {campaign.name}")
@@ -336,14 +402,16 @@ class ControlBot:
         return View("Enter group IDs, @usernames, or Telegram links (separate multiple groups with spaces).", rows)
 
     async def account_lookup(self, operation, *args):
-        if self.scheduler.clock() < self.scheduler.state.flood_until:
-            raise ValueError(f"Telegram flood wait until {utc(self.scheduler.state.flood_until)}.")
+        directory = self.scheduler.directory
+        if wait := getattr(directory, "blocked_for", lambda: 0)():
+            raise errors.FloodWaitError(request=None, capture=wait)
         try:
             return await operation(*args)
         except FLOOD_WAITS as exc:
-            self.scheduler.flood_wait(exc.seconds)
+            if hasattr(directory, "block"):
+                directory.block(exc.seconds)
             raise
-        except ACCOUNT_RESTRICTIONS:
+        except errors.PeerFloodError:
             self.scheduler.restrict_sending()
             raise
 
@@ -399,19 +467,26 @@ class ControlBot:
         if action not in {"groups", "pick"}:
             raise ValueError("That group selection has expired.")
         async with self.dispatch_lock:
-            groups = await self.account_lookup(self.scheduler.directory.joined)
+            groups = await self.account_lookup(self.scheduler.directory.joined, True)
         if action == "groups":
-            entries = [button(f"{group.title[:40]} ({group.id})", f"pick:{nonce}:{group.id}") for group in groups.values()]
+            chosen = set(flow.groups) if flow.step == "new_groups" else set()
+            entries = [
+                button(f"{'✅ ' if str(group.id) in chosen else ''}{group.title[:40]} ({group.id})", f"pick:{nonce}:{group.id}")
+                for group in groups.values()
+            ]
             back = [cancel]
             if flow.groups:
                 back.insert(0, button(f"Save {len(flow.groups)} selected", f"save_groups:{nonce}"))
-            return self.page("Joined groups" if entries else "No joined groups found.", entries, int(key), f"groups:{nonce}", back)
+            caption = "Pick the groups this campaign should post in. Tap again to unselect." if entries else "No joined groups found."
+            return self.page(caption, entries, int(key), f"groups:{nonce}", back)
         group_id = int(key)
         if group_id not in groups:
             raise ValueError("That group is no longer in your joined list.")
         if flow.step == "add_group":
             return await self.update_groups(owner, flow, [key])
-        if key not in flow.groups:
+        if key in flow.groups:
+            flow.groups.remove(key)
+        else:
             flow.groups.append(key)
         return self.group_prompt(flow)
 
@@ -444,12 +519,52 @@ class ControlBot:
             status = f"Telegram flood wait: sending paused until {utc(state.flood_until)}."
         else:
             status = "No account-wide sending pause."
-        return View(status, [[button("Campaigns", "list:0"), button("Menu", "menu")]])
+        t = self.t
+        wait = getattr(self.scheduler.directory, "blocked_for", lambda: 0)()
+        lines = [t("Sending paused. Nothing will be sent until you resume it.") if state.paused else t("Sending is on."),
+                 t(status)]
+        if wait:
+            lines.append(t(f"Telegram asked to wait {wait} more seconds before the group list can load again."))
+        for name, campaign in load_campaigns(self.path).items():
+            last = max(state.attempts.get(name, {}).values(), default=None)
+            lines.append(f"• {name}: {t('Enabled' if campaign.enabled else 'Disabled')}, "
+                         f"{t('Last attempt')}: {utc(last) if last else t('Never sent')}")
+        return View("\n".join(lines), [[button("Campaigns", "list:0"), button("Menu", "menu")], [self.pause_button()]])
+
+    def pause(self) -> View:
+        self.resume_nonce = None
+        self.scheduler.state.paused = True
+        self.scheduler.state.save()
+        return View("Sending paused. Nothing will be sent until you resume it.", [[self.pause_button(), button("Menu", "menu")]])
+
+    def ask_resume(self) -> View:
+        if not self.scheduler.state.paused:
+            return View("Sending is already on.", [[button("Menu", "menu")]])
+        self.resume_nonce = token_hex(8)
+        return View("Resume sending? Enabled campaigns will start posting to their selected groups on schedule.",
+                    [[button("Yes, resume sending", f"resume_yes:{self.resume_nonce}"), button("Cancel", "menu")]])
+
+    def resume(self, nonce: str) -> View:
+        if not self.resume_nonce or nonce != self.resume_nonce:
+            raise ValueError("That confirmation has expired. Start again from the campaign menu.")
+        self.resume_nonce = None
+        self.scheduler.state.paused = False
+        self.scheduler.state.save()
+        return View("Sending resumed.", [[self.pause_button(), button("Menu", "menu")]])
+
+    def preview(self, campaign: Campaign) -> View:
+        t = self.t
+        back = [[button("Campaign", f"view:{record_key(campaign.name)}")]]
+        prefix = f"{t('Ad text exactly as it will be posted:')}\n\n"
+        text = (prefix + campaign.message + f"\n\n"
+                f"{t('Characters')}: {len(campaign.message)} | {t('Groups count')}: {len(campaign.groups)} | "
+                f"{t('Every')} \u2066{campaign.interval}\u2069\n{t('Nothing was sent.')}")
+        return View(text, back, entities=shift_entities(campaign.entities, prefix))
 
     async def next_sends(self, campaign: Campaign) -> View:
         back = [[button("Campaign", f"view:{record_key(campaign.name)}")]]
         if not campaign.enabled:
-            return View(f"{campaign.name} is disabled.", back)
+            return View(f"{campaign.name} {self.t('is disabled.')}", back)
         if reason := campaign.message_length_error():
             return View(reason, back)
         async with self.dispatch_lock:
@@ -462,11 +577,11 @@ class ControlBot:
             for target in campaign.groups[:12]:
                 group = await self.account_lookup(self.scheduler.directory.resolve, target)
                 if not group:
-                    lines.append(f"{target[:75]}: not found among joined groups")
+                    lines.append(f"{target[:75]}: {self.t('not found among joined groups')}")
                 elif group.id not in seen:
                     seen.add(group.id)
                     due = state.next_due(campaign, str(group.id))
-                    lines.append(f"{group.title[:75]}: {'due now' if due <= now else utc(due)}")
+                    lines.append(f"{group.title[:75]}: {self.t('due now') if due <= now else utc(due)}")
             if len(campaign.groups) > 12:
-                lines.append("Showing the first 12 targets.")
-        return View(f"Next sends: {campaign.name}\n" + "\n".join(lines), back)
+                lines.append(self.t("Showing the first 12 targets."))
+        return View(f"{self.t('Next sends:')} {campaign.name}\n" + "\n".join(lines), back)
